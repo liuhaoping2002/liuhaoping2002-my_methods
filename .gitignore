@@ -1,6 +1,14 @@
+# Python
 __pycache__/
-*.pyc
-node_modules/
-.env
-.DS_Store
-*.log
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+*.egg-info/
+dist/
+build/
