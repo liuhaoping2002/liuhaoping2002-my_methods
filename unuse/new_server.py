@@ -2,13 +2,11 @@
 import grpc
 import numpy as np
 import io
-import os
 from concurrent import futures
 import demo_pb2
 import demo_pb2_grpc
 from scipy.special import softmax
 
-counter = 0
 def tensor_to_np(t: demo_pb2.Tensor) -> np.ndarray:
     #buf = io.BytesIO(t.data)
     #return np.load(buf)
@@ -45,7 +43,6 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
         self.ff_linear2 = np.random.randn(self.d_ff, self.d_model)
 
     def Process(self, request, context):
-        print("Process Start")
         op_id = request.op_id
         state = state_to_np(request.state)
         i = op_id
@@ -53,11 +50,6 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
             if i == 1:
                 # linear projections for Q, K, V
                 inp = state['input']
-                
-                #print(state['input'][0][0][:4])
-                global counter
-                counter = counter+1
-                
                 B, S, D = inp.shape
                 Q = np.dot(inp, self.w_q).reshape(B, S, self.h, self.d_k).transpose(0, 2, 1, 3)
                 K = np.dot(inp, self.w_k).reshape(B, S, self.h, self.d_k).transpose(0, 2, 1, 3)
@@ -65,44 +57,34 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
                 state['Q'] = Q
                 state['K'] = K
                 state['V'] = V
-                print("counter : ", counter, "Q  K  V")
                 i += 1
             elif i == 2:
                 # linear matmul and scale for scores
                 state['scores'] = np.matmul(state['Q'], state['K'].transpose(0, 1, 3, 2)) / np.sqrt(self.d_k)
-                #print("state['scores'][0][0][:4]")
-                print("counter : ", counter, "Q K^T")
                 i += 1
             elif i == 4:
                 # linear matmul for attention output
                 state['aout'] = np.matmul(state['attn'], state['V'])
-                print("counter : ", counter, "softmax(Q K^T)V")
-                #print("state['aout'][0][0][:4]")
                 i += 1
             elif i == 5:
                 # linear output projection
                 B, H, S_q, d_v = state['aout'].shape
                 aout = state['aout'].transpose(0, 2, 1, 3).reshape(B, S_q, self.d_model)
                 state['attn_out'] = np.dot(aout, self.w_o)
-                print("counter : ", counter, "softmax(Q K^T)VW_0")
                 i += 1
             elif i == 6:
                 # linear FFN first layer
                 state['ff1'] = np.dot(state['attn_out'], self.ff_linear1)
-                print("counter : ", counter, "FFN1")
                 i += 1
             elif i == 8:
                 # linear FFN second layer
                 state['ff2'] = np.dot(state['gelu'], self.ff_linear2)
-                print("counter : ", counter, "FFN2")
                 i += 1
             else:
                 # not a server op or end
-                print("Nothing")
                 break
         if i > 8:
             i = 999
-            print("99999999")
         return demo_pb2.TransformerResponse(op_id=i, state=demo_pb2.State(items=np_to_state(state)), status="ok")
 
 def serve():
@@ -114,5 +96,4 @@ def serve():
     server.wait_for_termination()
 
 if __name__ == '__main__':
-    np.random.seed(42)
     serve()

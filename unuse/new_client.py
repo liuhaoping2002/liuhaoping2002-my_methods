@@ -6,10 +6,6 @@ import demo_pb2
 import demo_pb2_grpc
 from scipy.special import softmax
 import time
-import os
-import logging
-logging.basicConfig(level=logging.INFO)
-
 
 # ---------- Tensor <-> bytes ----------
 def np_to_tensor(arr: np.ndarray) -> demo_pb2.Tensor:
@@ -40,24 +36,15 @@ class TransformerClient:
     def forward(self, i, state):
         while True:
             if i == 3:
-                #print("i==3:softmax", end='')
-                #print('    ' ,list(state.keys()))
-                #print('*****    ', state['input'][0][0][:4])
-                #print('*****    ', state['Q'][0][0][0][:4])
-                
                 # non-linear softmax
                 state['attn'] = softmax(state['scores'], axis=-1)
                 i += 1
             elif i == 7:
-                #print("i==7:relu", end='')
-                #print('    ' ,list(state.keys()))
                 # non-linear GELU approximation
                 x = state['ff1']
                 state['gelu'] = x * 0.5 * (1 + np.tanh(np.sqrt(2 / np.pi) * (x + 0.044715 * x**3)))
                 i += 1
             else:
-                #print("i==999:none", end='')
-                #print('    ' ,list(state.keys()))
                 # not a client op
                 break
         return i, state
@@ -68,7 +55,6 @@ def run():
     B, S, D = 2, 64, 64
     state = {'input': np.random.randn(B, S, D).astype(np.float32)}
 
-    print("Connect to server...")
     channel = grpc.insecure_channel('localhost:50051')
     stub = demo_pb2_grpc.TransformerServiceStub(channel)
 
@@ -81,26 +67,20 @@ def run():
             break
 
         req = demo_pb2.TransformerRequest(op_id=i, state=demo_pb2.State(items=np_to_state(state)))
-        
-        
-        try:
-            resp = stub.Process(req, timeout=10)   # 10 秒超时
-        except grpc.RpcError as e:
-            print(f"[CLIENT] gRPC error: {e.code()} | {e.details()}")
-            raise
-        #resp = stub.Process(req)
+        resp = stub.Process(req)
 
         i = resp.op_id
         state = state_to_np(resp.state)
         
-        #if 'aout' in state:
-        #    print(f"[op_id={i}] Final FFN output: {state['aout']}")
+        if 'aout' in state:
+            #arr = state['aout']
+            #print("type:", type(arr))
+            #print("is memmap:", isinstance(arr, np.memmap))
+            #print("filename:", getattr(arr, 'filename', 'N/A'))
+            print(f"[op_id={i}] Final FFN output: {state['aout']}")
         if 'ff2' in state:
-            if i>=10:
-                print(f"[op_id={i}] Final FFN output: {state['ff2'][0][0][:4]}")
-        #print(list(state.keys()))
+            print(f"[op_id={i}] Final FFN output: {state['ff2']}")
+        print(list(state.keys()))
 
 if __name__ == '__main__':
-    np.random.seed(42)
     run()
-    
