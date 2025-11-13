@@ -22,11 +22,17 @@
    make clean && make SGX=1
    ```
 
-5. 运行客户端
+5. 预保存客户端所需模型参数：
+
+   ```shell
+   python3 extract_weight_client.py 
+   ```
+
+6. 运行客户端
 
    ```shell
    gramine-direct ./pytorch full_layer_client.py	#without sgx hardware support
-   gramine-sgx ./pytorch full_layer_client.py	#with sgx hartware support
+   gramine-sgx ./pytorch full_layer_client.py		#with sgx hartware support
    ```
 
    
