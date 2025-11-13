@@ -2,10 +2,18 @@
 import grpc
 import numpy as np
 import io
+import time
 import demo_pb2
 import demo_pb2_grpc
 from transformers import AutoConfig, GPT2Model, AutoTokenizer
 from scipy.special import softmax as sp_softmax
+
+
+def time_cost(outputs, time_past):
+    time_now = time.time()
+    time_cost = time_now-time_past
+    print(f"{outputs} cost {time_cost*1000:.2f} ms")
+    return time_now
 
 def np_to_tensor(arr: np.ndarray) -> demo_pb2.Tensor:
     if isinstance(arr, np.ndarray) and np.issubdtype(arr.dtype, np.floating):
@@ -115,6 +123,7 @@ class TransformerClient:
         return i, state
 
 def run():
+    time_count = time.time()
     NNN = 10485760 * 4
     options = [
         ('grpc.max_send_message_length', NNN),
@@ -122,9 +131,10 @@ def run():
     ]
     channel = grpc.insecure_channel('localhost:50051', options=options)
     stub = demo_pb2_grpc.TransformerServiceStub(channel)
-
+    
+    time_count = time_cost("channel establiash", time_count)
     client = TransformerClient()
-
+    
     # 输入示例
     input_text = "The capital of France is"
     input_ids = client.tokenizer(input_text, return_tensors="np")["input_ids"]  # (1, seq_len)
@@ -133,7 +143,8 @@ def run():
     hidden = client.wte[input_ids] + client.wpe[np.arange(seq_len)]
 
     state = {'input': hidden.astype(np.float32)}
-
+    time_count = time_cost("Tokenizer", time_count)
+    
     i = 1  # start block 0
 
     for layer in range(client.n_layer):
@@ -152,7 +163,9 @@ def run():
             resp = stub.Process(req)
             i = resp.op_id
             state = state_to_np(resp.state)
-            print(f"[client] layer {layer} received op_id={i} keys={list(state.keys())}")
+            if i%100 == 13:
+                time_count = time_cost(f"Layer {i//100}", time_count)
+            #print(f"[client] layer {layer} received op_id={i} keys={list(state.keys())}")
 
     # Final LN
     i = 1201
@@ -161,11 +174,13 @@ def run():
     resp = stub.Process(req)
     state = state_to_np(resp.state)
     logits = state['logits']
+    time_count = time_cost(f"Final LN", time_count)
 
     print(f"Logits shape: {logits.shape}")
     # 示例生成下一个token
     next_token_id = int(np.argmax(logits[0, -1, :]))
     print(f"Next token: '{client.tokenizer.decode(next_token_id)}'")
+    time_count = time_cost(f"Decode", time_count)
 
 if __name__ == '__main__':
     run()
