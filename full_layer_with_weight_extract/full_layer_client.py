@@ -8,6 +8,8 @@ from transformers import AutoConfig, GPT2Model, AutoTokenizer
 from scipy.special import softmax as sp_softmax
 
 def np_to_tensor(arr: np.ndarray) -> demo_pb2.Tensor:
+    if isinstance(arr, np.ndarray) and np.issubdtype(arr.dtype, np.floating):
+        arr = arr.astype(np.float32, copy=False)
     buf = io.BytesIO()
     np.save(buf, arr, allow_pickle=False)
     return demo_pb2.Tensor(
@@ -54,7 +56,7 @@ class TransformerClient:
 
         self.tokenizer = AutoTokenizer.from_pretrained("gpt2")'''
         # 加载所有参数从单一.npz
-        data = np.load('/gpt2_params/params.npz')
+        data = np.load('gpt2_params/params.npz')
         
         self.n_layer = int(data['n_layer'][0])
         
@@ -71,7 +73,7 @@ class TransformerClient:
         self.wpe = data['wpe']
         
         # 加载 tokenizer 从目录
-        self.tokenizer = AutoTokenizer.from_pretrained('/gpt2_params/tokenizer')
+        self.tokenizer = AutoTokenizer.from_pretrained('gpt2_params/tokenizer')
 
     def forward(self, i, state):
         current_layer = i // 100

@@ -171,6 +171,8 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
             else:
                 # 保险兜底：如果不是 ndarray，先尝试转为 ndarray
                 arr = np.asarray(v)
+                if np.issubdtype(arr.dtype, np.floating):
+                    arr = arr.astype(np.float32, copy=False)
                 torch_state[k] = torch.from_numpy(arr).to(self.device)
         return torch_state
 
