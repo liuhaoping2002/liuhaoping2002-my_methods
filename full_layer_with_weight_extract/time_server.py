@@ -352,12 +352,13 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
         out_state_np = self._to_numpy_state(s)
         
         if i == 9999:
-            print("\n服务端本次输入执行时间统计:")
-            print(f"{'op_id':>6} | {'Executor':>8} | {'Time (ms)':>10}")
-            print("-" * 30)
-            for op_id in sorted(local_storage.all_times.keys()):
-                executor, time_ms = local_storage.all_times[op_id]
-                print(f"{op_id:>6} | {executor:>8} | {time_ms:>10.2f}")
+            #print("\n服务端本次输入执行时间统计:")
+            with open('time_server.log', 'w') as f:
+                print(f"{'op_id':>6} | {'Executor':>8} | {'Time (ms)':>10}", file=f)
+                print("-" * 30, file=f)
+                for op_id in sorted(local_storage.all_times.keys()):
+                    executor, time_ms = local_storage.all_times[op_id]
+                    print(f"{op_id:>6} | {executor:>8} | {time_ms:>10.2f}", file=f)
             # 重置 for 下一个输入
             local_storage.all_times = {}
         

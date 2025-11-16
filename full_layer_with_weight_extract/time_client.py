@@ -196,12 +196,13 @@ def run():
     #time_count = time_cost(f"Final LN", time_count)
 
     # Print the time statistics in a clear table
-    print("\nExecution Time per op_id:")
-    print(f"{'op_id':>6} | {'Executor':>8} | {'Time (ms)':>10}")
-    print("-" * 30)
-    for op_id in sorted(all_times.keys()):
-        executor, time_ms = all_times[op_id]
-        print(f"{op_id:>6} | {executor:>8} | {time_ms:>10.2f}")
+    #print("\nExecution Time per op_id:")
+    with open('time_client.log', 'w') as f:
+        print(f"{'op_id':>6} | {'Executor':>8} | {'Time (ms)':>10}", file=f)
+        print("-" * 30, file=f)
+        for op_id in sorted(all_times.keys()):
+            executor, time_ms = all_times[op_id]
+            print(f"{op_id:>6} | {executor:>8} | {time_ms:>10.2f}", file=f)
 
     print(f"Logits shape: {logits.shape}")
     # 示例生成下一个token
