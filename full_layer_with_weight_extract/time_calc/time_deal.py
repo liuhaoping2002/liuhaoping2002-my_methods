@@ -1,5 +1,22 @@
 import re
 import sys
+import csv
+
+# 在 main() 函数中，parse_table 之后、处理 all_data 之前添加：
+OP_NAME_MAP = {
+    1: "LayerNorm1",
+    2: "QKV",
+    3: "QK^T",
+    4: "Softmax",
+    5: "*V",
+    6: "*Wo",
+    7: "Residual_Attn",
+    8: "LayerNorm2",
+    9: "FFN1",
+    10: "GELU",
+    11: "FFN2",
+    12: "Residual_FFN"
+}
 
 def parse_table(log_content, is_client=False):
     data = {}
@@ -45,6 +62,13 @@ def main(client_log_file, server_log_file):
             entry['server_time'] = server_data[op_id]['time']
         all_data[layer].append(entry)
 
+    # 准备CSV数据列表
+    csv_data = []
+    csv_data.append(['Layer', 'ID/Type', 'Time (ms)'])  # 表头
+
+    all_layers_total = 0.0  # 所有层总用时
+    all_layers = []
+    
     # 按层处理 0-11 层
     for layer in range(12):  # 0-11
         if layer not in all_data:
@@ -53,7 +77,10 @@ def main(client_log_file, server_log_file):
         sorted_ops = sorted(all_data[layer], key=lambda x: x['local_i'])
         
         i = 0
+        
+        layer_total = 0.0
         while i < len(sorted_ops):
+            
             op = sorted_ops[i]
             op_id = op['op_id']
             local_i = op['local_i']
@@ -61,7 +88,11 @@ def main(client_log_file, server_log_file):
             if 'client_time' in op and op['client_executor'] == 'server' and 'server_time' in op:
                 # 同时有 Client (server) 和 Server (server)
                 op_time = op['server_time']
+                layer_total += op_time
                 print(f"  op_id {op_id} (local_i {local_i}):\n    算子用时 = {op_time:.2f} ms")
+                
+                # 添加到CSV: 算子id，用时
+                csv_data.append([layer, f"{OP_NAME_MAP[op_id%100]}", op_time])
                 
                 # 计算通信开销
                 rtt = op['client_time']
@@ -70,27 +101,59 @@ def main(client_log_file, server_log_file):
                 while j < len(sorted_ops):
                     next_op = sorted_ops[j]
                     if 'client_time' in next_op and next_op['client_executor'] == 'client' and 'server_time' not in next_op:
-                        # 遇到仅含 Client (client)，停下，不减
                         break
                     if 'server_time' in next_op:
                         subtract += next_op['server_time']
                     j += 1
                 
                 overhead = rtt - subtract
+                layer_total += overhead
                 print(f"    通信开销 = {overhead:.2f} ms")
+                
+                # 添加到CSV: 通信开销，用时
+                csv_data.append([layer, "Communication", overhead])
+            
             else:
-                # 其他情况，直接打印
+                # 其他情况，直接打印并累加
                 print(f"  op_id {op_id} (local_i {local_i}):")
                 if 'client_time' in op:
                     print(f"    Client ({op['client_executor']}): {op['client_time']:.2f} ms")
+                    layer_total += op['client_time']
+                    # 添加到CSV: 算子id，用时 (假设这些是算子用时)
+                    csv_data.append([layer, f"{OP_NAME_MAP[op_id%100]}", op['client_time']])
                 if 'server_time' in op:
                     print(f"    Server: {op['server_time']:.2f} ms")
+                    layer_total += op['server_time']
+                    # 添加到CSV: 算子id，用时
+                    csv_data.append([layer, f"{OP_NAME_MAP[op_id%100]}", op['server_time']])
             
             i += 1
+        
+        # 输出每层总用时
+        print(f"Layer {layer} 总用时: {layer_total:.3f} ms")
         print("---")
+        
+        # 添加到CSV
+        #csv_data.append([layer, "Layer Total", layer_total])
+        all_layers.append([layer, "Layer Total", layer_total])
+        all_layers_total += layer_total
+
+    # 输出所有层总用时
+
+    for per_layers in all_layers:
+        csv_data.append(per_layers)
+    print(f"所有层总用时: {all_layers_total:.3f} ms")
+    
+    # 添加到CSV
+    csv_data.append(["All Layers", "Total", all_layers_total])
+
+    # 保存到CSV文件
+    with open('output.csv', 'w', newline='', encoding='utf-8') as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerows(csv_data)
 
 if __name__ == '__main__':
     if len(sys.argv) != 3:
-        print("用法: python analyze_logs.py client.log server.log")
+        print("用法: python time_deal.py client.log server.log")
         sys.exit(1)
     main(sys.argv[1], sys.argv[2])
