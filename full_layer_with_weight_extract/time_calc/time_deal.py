@@ -64,7 +64,7 @@ def main(client_log_file, server_log_file):
 
     # 准备CSV数据列表
     csv_data = []
-    csv_data.append(['Layer', 'ID/Type', 'Time (ms)'])  # 表头
+    csv_data.append(['Layer', 'ID/Type', 'Time (ms)'])
 
     all_layers_total = 0.0  # 所有层总用时
     all_layers = []
@@ -89,14 +89,13 @@ def main(client_log_file, server_log_file):
                 # 同时有 Client (server) 和 Server (server)
                 op_time = op['server_time']
                 layer_total += op_time
-                print(f"  op_id {op_id} (local_i {local_i}):\n    算子用时 = {op_time:.2f} ms")
+                print(f"  op {OP_NAME_MAP[op_id%100]} :\n    Server: {op_time:.2f} ms")
                 
-                # 添加到CSV: 算子id，用时
                 csv_data.append([layer, f"{OP_NAME_MAP[op_id%100]}", op_time])
                 
                 # 计算通信开销
                 rtt = op['client_time']
-                subtract = op_time  # 减去当前 server
+                subtract = op_time
                 j = i + 1
                 while j < len(sorted_ops):
                     next_op = sorted_ops[j]
@@ -108,23 +107,21 @@ def main(client_log_file, server_log_file):
                 
                 overhead = rtt - subtract
                 layer_total += overhead
-                print(f"    通信开销 = {overhead:.2f} ms")
+                print(f"    Commun: {overhead:.2f} ms")
                 
                 # 添加到CSV: 通信开销，用时
                 csv_data.append([layer, "Communication", overhead])
             
             else:
                 # 其他情况，直接打印并累加
-                print(f"  op_id {op_id} (local_i {local_i}):")
+                print(f"  op {OP_NAME_MAP[op_id%100]}:")
                 if 'client_time' in op:
-                    print(f"    Client ({op['client_executor']}): {op['client_time']:.2f} ms")
+                    print(f"    Client: {op['client_time']:.2f} ms")
                     layer_total += op['client_time']
-                    # 添加到CSV: 算子id，用时 (假设这些是算子用时)
                     csv_data.append([layer, f"{OP_NAME_MAP[op_id%100]}", op['client_time']])
                 if 'server_time' in op:
                     print(f"    Server: {op['server_time']:.2f} ms")
                     layer_total += op['server_time']
-                    # 添加到CSV: 算子id，用时
                     csv_data.append([layer, f"{OP_NAME_MAP[op_id%100]}", op['server_time']])
             
             i += 1
