@@ -175,10 +175,12 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
             return sp_softmax(x, axis=axis)
 
     def full_forward_all(self, input_hidden):
+        layer_time = {}
         s = self._to_torch_state({'input': input_hidden})
         x = s['input']
 
         for layer in range(self.n_layer):
+            st = time.time()
             # LN1
             ln1 = self.layer_norm(x, self.ln1_gamma[layer], self.ln1_beta[layer])
 
@@ -250,16 +252,29 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
 
             # final residual
             x = attn_residual + ff2
+            ed = time.time()
+            layer_time[f"layer {layer}"] = (ed - st) * 1000
 
         # Final LN (现在在 REE)
+        st = time.time()
         ln_final = self.layer_norm(x, self.final_gamma, self.final_beta)
+        ed = time.time()
+        layer_time[f"last LN"] = (ed - st) * 1000
 
         # LM Head (logits)
+        st = time.time()
         if self.use_cuda:
             logits = torch.matmul(ln_final, self.lm_head_w)
         else:
             logits = np.dot(ln_final, self.lm_head_w)
+        ed = time.time()
+        layer_time[f"logits"] = (ed - st) * 1000
 
+        total_time = 0
+        for op in layer_time:
+            print(f"{op} cost {layer_time[op]} ms")
+            total_time += layer_time[op]
+        print(f"Total time cost {total_time} ms")
         return logits
 
     def Process(self, request, context):

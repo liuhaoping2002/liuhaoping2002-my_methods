@@ -59,42 +59,53 @@ class TransformerClient:
         return hidden.astype(np.float32)
 
 def perform_inference(client, stub, input_text, collect_times=True):
+
+    all_times = {} if collect_times else None
+
     start_time = time.time() if collect_times else None
     
     # TEE: Embedding
     hidden = client.perform_embedding(input_text)
     state = {'input': hidden}
     
-    all_times = {} if collect_times else None
+    end_time = time.time() if collect_times else None
+    if collect_times:
+        all_times['embedding'] = (end_time-start_time)*1000
     
     # 唯一一次通信: 发送 input 到 REE 执行所有 blocks + final LN + logits
     if collect_times:
         req = demo_pb2.TransformerRequest(op_id=1000, state=demo_pb2.State(items=np_to_state(state)))
     else:
         req = demo_pb2.TransformerRequest(op_id=999, state=demo_pb2.State(items=np_to_state(state)))
+
     start = time.time() if collect_times else None
     resp = stub.Process(req)
     end = time.time() if collect_times else None
+    
     state = state_to_np(resp.state)
     logits = state['logits']
     if collect_times:
-        all_times[1000] = ('server_all', (end - start) * 1000)
+        all_times['server'] = (end - start) * 1000
 
+    start_time = time.time() if collect_times else None
     # TEE: 采样生成 token（这里用 argmax 作为示例）
     next_token_id = int(np.argmax(logits[0, -1, :]))
+    end_time = time.time() if collect_times else None
+    
 
-    if collect_times:
-        print(f"Logits shape: {logits.shape}")
+    if collect_times:    
         print(f"Next token: '{client.tokenizer.decode(next_token_id)}'")
-        end_time = time.time()
-        print(f"Total time cost: {(end_time - start_time) * 1000:.3f} ms")
+        all_times['decode'] = (end_time- start_time) * 1000
 
-        with open('time_client.log', 'w') as f:
+        for op in all_times:
+            print(f"{op} cost {all_times[op]:.2f} ms")
+
+        '''with open('time_client.log', 'w') as f:
             print(f"{'op_id':>6} | {'Executor':>8} | {'Time (ms)':>10}", file=f)
             print("-" * 30, file=f)
             for op_id in sorted(all_times.keys()):
                 executor, time_ms = all_times[op_id]
-                print(f"{op_id:>6} | {executor:>8} | {time_ms:>10.2f}", file=f)
+                print(f"{op_id:>6} | {executor:>8} | {time_ms:>10.2f}", file=f)'''
 
     return logits, next_token_id
 
