@@ -1,0 +1,110 @@
+Layer,ID/Type,Time (ms)
+0,QKV,8.19
+0,QK^T,0.11
+0,*V,0.02
+0,*Wo,2.99
+0,Residual_Attn,0.01
+0,FFN1,34.37
+0,FFN2,32.24
+0,Residual_FFN,0.01
+1,QKV,8.09
+1,QK^T,0.09
+1,*V,0.02
+1,*Wo,2.44
+1,Residual_Attn,0.0
+1,FFN1,35.85
+1,FFN2,28.28
+1,Residual_FFN,0.01
+2,QKV,10.82
+2,QK^T,0.15
+2,*V,0.02
+2,*Wo,2.31
+2,Residual_Attn,0.0
+2,FFN1,38.78
+2,FFN2,35.67
+2,Residual_FFN,0.01
+3,QKV,7.92
+3,QK^T,0.1
+3,*V,0.02
+3,*Wo,3.63
+3,Residual_Attn,0.0
+3,FFN1,35.66
+3,FFN2,31.73
+3,Residual_FFN,0.01
+4,QKV,9.14
+4,QK^T,0.12
+4,*V,0.02
+4,*Wo,2.46
+4,Residual_Attn,0.0
+4,FFN1,35.49
+4,FFN2,31.85
+4,Residual_FFN,0.01
+5,QKV,8.22
+5,QK^T,0.1
+5,*V,0.02
+5,*Wo,2.42
+5,Residual_Attn,0.0
+5,FFN1,40.12
+5,FFN2,33.02
+5,Residual_FFN,0.01
+6,QKV,8.21
+6,QK^T,0.11
+6,*V,0.02
+6,*Wo,2.48
+6,Residual_Attn,0.0
+6,FFN1,49.21
+6,FFN2,31.43
+6,Residual_FFN,0.01
+7,QKV,8.69
+7,QK^T,0.11
+7,*V,0.02
+7,*Wo,2.58
+7,Residual_Attn,0.0
+7,FFN1,34.61
+7,FFN2,30.97
+7,Residual_FFN,0.01
+8,QKV,7.93
+8,QK^T,0.16
+8,*V,0.02
+8,*Wo,2.26
+8,Residual_Attn,0.0
+8,FFN1,33.77
+8,FFN2,30.33
+8,Residual_FFN,0.01
+9,QKV,8.29
+9,QK^T,0.14
+9,*V,0.02
+9,*Wo,2.26
+9,Residual_Attn,0.0
+9,FFN1,38.07
+9,FFN2,28.66
+9,Residual_FFN,0.01
+10,QKV,7.8
+10,QK^T,0.1
+10,*V,0.04
+10,*Wo,2.34
+10,Residual_Attn,0.0
+10,FFN1,35.27
+10,FFN2,28.92
+10,Residual_FFN,0.01
+11,QKV,7.73
+11,QK^T,0.09
+11,*V,0.02
+11,*Wo,2.48
+11,Residual_Attn,0.0
+11,FFN1,31.65
+11,FFN2,33.68
+11,Residual_FFN,0.01
+0,Layer Total,77.94000000000001
+1,Layer Total,74.78000000000002
+2,Layer Total,87.76
+3,Layer Total,79.07000000000001
+4,Layer Total,79.09000000000002
+5,Layer Total,83.91000000000001
+6,Layer Total,91.47000000000001
+7,Layer Total,76.99
+8,Layer Total,74.48
+9,Layer Total,77.45
+10,Layer Total,74.48
+11,Layer Total,75.66000000000001
+All Layers,Total,953.0800000000002
