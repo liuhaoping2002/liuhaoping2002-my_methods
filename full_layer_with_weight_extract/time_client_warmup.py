@@ -46,29 +46,12 @@ def layer_norm(x, weight, bias, eps=1e-5):
 
 class TransformerClient:
     def __init__(self):
-        '''config = AutoConfig.from_pretrained("gpt2")
-        self.n_layer = config.n_layer  # 12
-
-        model = GPT2Model.from_pretrained("gpt2")
-
-        self.ln1_gamma = [layer.ln_1.weight.detach().cpu().numpy() for layer in model.h]
-        self.ln1_beta = [layer.ln_1.bias.detach().cpu().numpy() for layer in model.h]
-        self.ln2_gamma = [layer.ln_2.weight.detach().cpu().numpy() for layer in model.h]
-        self.ln2_beta = [layer.ln_2.bias.detach().cpu().numpy() for layer in model.h]
-
-        self.final_gamma = model.ln_f.weight.detach().cpu().numpy()
-        self.final_beta = model.ln_f.bias.detach().cpu().numpy()
-
-        self.wte = model.wte.weight.detach().cpu().numpy()
-        self.wpe = model.wpe.weight.detach().cpu().numpy()
-
-        self.tokenizer = AutoTokenizer.from_pretrained("gpt2")'''
-        # 加载所有参数从单一.npz
+        # 加载所有参数从单一.npz（原代码不变）
         data = np.load('gpt2_params/params.npz')
         
         self.n_layer = int(data['n_layer'][0])
         
-        # 切分栈数组回列表
+        # 切分栈数组回列表（原代码不变）
         self.ln1_gamma = [data['ln1_gamma'][i] for i in range(self.n_layer)]
         self.ln1_beta = [data['ln1_beta'][i] for i in range(self.n_layer)]
         self.ln2_gamma = [data['ln2_gamma'][i] for i in range(self.n_layer)]
@@ -80,8 +63,36 @@ class TransformerClient:
         self.wte = data['wte']
         self.wpe = data['wpe']
         
-        # 加载 tokenizer 从目录
+        # 加载 tokenizer 从目录（原代码不变）
         self.tokenizer = AutoTokenizer.from_pretrained('gpt2_params/tokenizer')
+        
+        # 新增：假设hidden_size（GPT-2 small: 768）
+        self.hidden_size = 768
+        
+        # 新增：全局warmup，在初始化时预热所有操作类型（不计入时间测量）
+        self._warmup_operations()
+
+    def _warmup_operations(self):
+        warmup_runs = 5  # warmup次数
+        # Dummy数据：匹配典型形状 (batch=1, seq=1, hidden=768; attn_heads=12; ffn=3072)
+        dummy_input_ln = np.random.randn(1, 1, self.hidden_size)
+        dummy_gamma = np.ones(self.hidden_size)
+        dummy_beta = np.zeros(self.hidden_size)
+        
+        dummy_scores_softmax = np.random.randn(1, 12, 1, 1)  # attn scores
+        
+        dummy_ff1_gelu = np.random.randn(1, 1, self.hidden_size * 4)  # FFN intermediate
+        
+        for _ in range(warmup_runs):
+            # Pre-warmup LayerNorm (for LN1, LN2, final)
+            layer_norm(dummy_input_ln, dummy_gamma, dummy_beta)
+            
+            # Pre-warmup Softmax
+            sp_softmax(dummy_scores_softmax, axis=-1)
+            
+            # Pre-warmup GELU
+            x = dummy_ff1_gelu
+            x * 0.5 * (1.0 + np.tanh(np.sqrt(2.0 / np.pi) * (x + 0.044715 * np.power(x, 3))))
 
     def forward(self, i, state):
         current_layer = i // 100
@@ -135,8 +146,8 @@ def run():
     time_count = time_cost("channel establiash", time_count)
     client = TransformerClient()
     
-    start_time = time.time()
     # 输入示例
+    start_time = time.time()
     input_text = "The capital of France is"
     input_ids = client.tokenizer(input_text, return_tensors="np")["input_ids"]  # (1, seq_len)
     seq_len = input_ids.shape[1]
@@ -144,7 +155,7 @@ def run():
     hidden = client.wte[input_ids] + client.wpe[np.arange(seq_len)]
 
     state = {'input': hidden.astype(np.float32)}
-    #time_count = time_cost("Tokenizer", time_count)
+    time_count = time_cost("Tokenizer", time_count)
     
     all_times = {}  # op_id: ('client' or 'server', time_ms)
     
@@ -194,25 +205,27 @@ def run():
     all_times[i] = ('server', (end - start) * 1000)  # i is 1202 here
     state = state_to_np(resp.state)
     logits = state['logits']
+    
     #time_count = time_cost(f"Final LN", time_count)
+
+    # Print the time statistics in a clear table
+
 
     print(f"Logits shape: {logits.shape}")
     # 示例生成下一个token
     next_token_id = int(np.argmax(logits[0, -1, :]))
     print(f"Next token: '{client.tokenizer.decode(next_token_id)}'")
-    
     end_time = time.time()
     print(f"Total time cost: {(end_time-start_time)*1000:.3f} ms")
     #time_count = time_cost(f"Decode", time_count)
-    
-    # Print the time statistics in a clear table
-    #print("\nExecution Time per op_id:")
+
     with open('time_client.log', 'w') as f:
+    #print("\nExecution Time per op_id:")
         print(f"{'op_id':>6} | {'Executor':>8} | {'Time (ms)':>10}", file=f)
         print("-" * 30, file=f)
         for op_id in sorted(all_times.keys()):
             executor, time_ms = all_times[op_id]
             print(f"{op_id:>6} | {executor:>8} | {time_ms:>10.2f}", file=f)
-
+    
 if __name__ == '__main__':
     run()
