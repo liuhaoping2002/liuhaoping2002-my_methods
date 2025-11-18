@@ -79,7 +79,9 @@ def perform_inference(client, stub, input_text, collect_times=True):
         req = demo_pb2.TransformerRequest(op_id=999, state=demo_pb2.State(items=np_to_state(state)))
 
     start = time.time() if collect_times else None
+    print("client start: ", time.time())
     resp = stub.Process(req)
+    print("client end: ", time.time())
     end = time.time() if collect_times else None
     
     state = state_to_np(resp.state)

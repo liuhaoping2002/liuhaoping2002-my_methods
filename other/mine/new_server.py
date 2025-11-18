@@ -174,7 +174,7 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
         else:
             return sp_softmax(x, axis=axis)
 
-    def full_forward_all(self, input_hidden):
+    def full_forward_all(self, input_hidden, whether_warmup=False):
         layer_time = {}
         s = self._to_torch_state({'input': input_hidden})
         x = s['input']
@@ -271,13 +271,15 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
         layer_time[f"logits"] = (ed - st) * 1000
 
         total_time = 0
-        for op in layer_time:
-            print(f"{op} cost {layer_time[op]} ms")
-            total_time += layer_time[op]
-        print(f"Total time cost {total_time} ms")
+        if whether_warmup == False:
+            for op in layer_time:
+                print(f"{op} cost {layer_time[op]} ms")
+                total_time += layer_time[op]
+            print(f"Total time cost {total_time} ms")
         return logits
 
     def Process(self, request, context):
+        print("Server start: ", time.time())
         if not hasattr(local_storage, 'all_times'):
             local_storage.all_times = {}
         
@@ -285,6 +287,7 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
         state = state_to_np(request.state)
         
         if op_id == 1000:  # 执行所有 blocks + final LN + logits
+            print(state)
             start = time.time()
             input_hidden = state['input']
             logits = self.full_forward_all(input_hidden)
@@ -292,11 +295,13 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
             local_storage.all_times[op_id] = ('server', (end - start) * 1000)
             print('server', (end - start) * 1000, "ms")
             out_state_np = self._to_numpy_state({'logits': logits})
+            print(out_state_np)
+            print("Server end: ", time.time())
             return demo_pb2.TransformerResponse(op_id=1001, state=demo_pb2.State(items=np_to_state(out_state_np)), status="ok")
         elif op_id == 999:
             start = time.time()
             input_hidden = state['input']
-            logits = self.full_forward_all(input_hidden)
+            logits = self.full_forward_all(input_hidden, whether_warmup=True)
             end = time.time()
             local_storage.all_times[op_id] = ('server', (end - start) * 1000)
             #print('server', (end - start) * 1000, "ms")
