@@ -1,3 +1,4 @@
+# server.py (REE)
 import grpc
 import numpy as np
 import io
@@ -8,6 +9,7 @@ import argparse
 import math
 import sys
 import time
+from scipy.special import softmax as sp_softmax
 import threading
 
 try:
@@ -35,11 +37,39 @@ def state_to_np(state_pb):
 def np_to_state(state_np):
     return {k: np_to_tensor(v) for k, v in state_np.items()}
 
+def sample_A_constructive(d, a=1.0, rng=None):
+    if rng is None:
+        rng = np.random.default_rng()
+    one = np.ones((d,1))
+    u0 = one / np.sqrt(d)      # 均值方向 unit vector (d,1)
+    # --- 构造 U_s：d x (d-1) 矩阵，列为与 u0 正交的正交基 ---
+    R = rng.normal(size=(d, d-1))
+    R = R - u0 @ (u0.T @ R)    # 把列投影到与 u0 正交
+    # QR 得到正交基（d x d, 取前 d-1 列）
+    Q_full, _ = np.linalg.qr(R, mode='reduced')  # returns d x (d-1)
+    Us = Q_full[:, :d-1]  # d x (d-1), orthonormal columns spanning S
+    # --- 在 (d-1)-维上采样 Haar 正交矩阵 Q_small ---
+    G = rng.normal(size=(d-1, d-1))
+    Qs, Rg = np.linalg.qr(G)
+    # 调整符号，使得分布是 Haar (对角符号修正)
+    D = np.sign(np.diag(Rg))
+    D[D==0] = 1.0
+    Q_small = Qs * D
+    # --- embed Q_small into original space: Q = Us @ Q_small @ Us.T ---
+    Q = Us @ (Q_small @ Us.T)
+    # 投影 J, P
+    J = (one @ one.T) / d
+    P = np.eye(d) - J
+    # A
+    A = a * J + Q   # note QJ = 0, QP = Q, so this equals aJ + QP
+    return A
+
+model_dim = 768
 local_storage = threading.local()
 
 class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
     def __init__(self, device_choice: str = "cpu"):
-        # 选择 device
+        # device 选择
         use_cuda = False
         device = None
         if device_choice == "cuda":
@@ -62,18 +92,19 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
         self.use_cuda = use_cuda
         self.device = device
 
-        # 从本地NPZ加载参数（替换原from_pretrained）
-        try:
-            data = np.load('gpt2_server_params.npz')
-        except FileNotFoundError:
-            raise FileNotFoundError("gpt2_server_params.npz not found. Run download_gpt2_params.py first.")
+        # 加载参数 (server + client 的所有参数)
+        #data = np.load('gpt2_server_params.npz')
+        #client_data = np.load('gpt2_params/params.npz')  # 加载 LN 和 final LN 参数
+        
+        data = np.load('gpt2_server_params_obf.npz')
+        client_data = np.load('gpt2_client_params_obf.npz') 
 
         self.n_layer = int(data['n_layer'][0])
-        self.d_model = data['c_attn_w'].shape[-1] // 3  # 从c_attn_w推断 (d_model * 3)
-        self.h = 12  # GPT-2 small的固定head数，可硬编码或从config推断
+        self.d_model = data['c_attn_w'].shape[-1] // 3
+        self.h = 12
         self.d_k = self.d_model // self.h
 
-        # 加载numpy权重
+        # 线性层参数
         c_attn_w_np = [data['c_attn_w'][i] for i in range(self.n_layer)]
         c_attn_b_np = [data['c_attn_b'][i] for i in range(self.n_layer)]
 
@@ -88,281 +119,243 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
 
         lm_head_w_np = data['lm_head_w']
 
-        # 根据是否使用 cuda，将权重转换为 torch tensors（并移动到 device）或保持 numpy
+        # LN 参数（包括 final）
+        self.ln1_gamma = [client_data['ln1_gamma'][i] for i in range(self.n_layer)]
+        self.ln1_beta = [client_data['ln1_beta'][i] for i in range(self.n_layer)]
+        self.ln2_gamma = [client_data['ln2_gamma'][i] for i in range(self.n_layer)]
+        self.ln2_beta = [client_data['ln2_beta'][i] for i in range(self.n_layer)]
+        self.final_gamma = client_data['final_gamma']
+        self.final_beta = client_data['final_beta']
+
+        # 转 torch 或保持 numpy
         if self.use_cuda:
             self.c_attn_w = [torch.from_numpy(w).to(self.device) for w in c_attn_w_np]
             self.c_attn_b = [torch.from_numpy(b).to(self.device) for b in c_attn_b_np]
-
             self.c_proj_w = [torch.from_numpy(w).to(self.device) for w in c_proj_w_np]
             self.c_proj_b = [torch.from_numpy(b).to(self.device) for b in c_proj_b_np]
-
             self.mlp_c_fc_w = [torch.from_numpy(w).to(self.device) for w in mlp_c_fc_w_np]
             self.mlp_c_fc_b = [torch.from_numpy(b).to(self.device) for b in mlp_c_fc_b_np]
-
             self.mlp_c_proj_w = [torch.from_numpy(w).to(self.device) for w in mlp_c_proj_w_np]
             self.mlp_c_proj_b = [torch.from_numpy(b).to(self.device) for b in mlp_c_proj_b_np]
-
             self.lm_head_w = torch.from_numpy(lm_head_w_np).to(self.device)
+
+            self.ln1_gamma = [torch.from_numpy(g).to(self.device) for g in self.ln1_gamma]
+            self.ln1_beta = [torch.from_numpy(b).to(self.device) for b in self.ln1_beta]
+            self.ln2_gamma = [torch.from_numpy(g).to(self.device) for g in self.ln2_gamma]
+            self.ln2_beta = [torch.from_numpy(b).to(self.device) for b in self.ln2_beta]
+            self.final_gamma = torch.from_numpy(client_data['final_gamma']).to(self.device)
+            self.final_beta = torch.from_numpy(client_data['final_beta']).to(self.device)
         else:
             self.c_attn_w = c_attn_w_np
             self.c_attn_b = c_attn_b_np
-
             self.c_proj_w = c_proj_w_np
             self.c_proj_b = c_proj_b_np
-
             self.mlp_c_fc_w = mlp_c_fc_w_np
             self.mlp_c_fc_b = mlp_c_fc_b_np
-
             self.mlp_c_proj_w = mlp_c_proj_w_np
             self.mlp_c_proj_b = mlp_c_proj_b_np
-
             self.lm_head_w = lm_head_w_np
 
+            self.final_gamma = client_data['final_gamma']
+            self.final_beta = client_data['final_beta']
+
         print("Device chosen:", "cuda" if self.use_cuda else "cpu")
-        print("Number of layers:", self.n_layer)
-        # 打印形状（与原先保持一致）
-        print("\nShapes for c_attn_w (per layer):")
-        for i, w in enumerate(self.c_attn_w):
-            print(f"Layer {i}: {tuple(w.shape) if not self.use_cuda else tuple(w.size())}")
-
-        print("\nShapes for c_attn_b (per layer):")
-        for i, b in enumerate(self.c_attn_b):
-            print(f"Layer {i}: {tuple(b.shape) if not self.use_cuda else tuple(b.size())}")
-
-        print("\nShapes for c_proj_w (per layer):")
-        for i, w in enumerate(self.c_proj_w):
-            print(f"Layer {i}: {tuple(w.shape) if not self.use_cuda else tuple(w.size())}")
-
-        print("\nShapes for c_proj_b (per layer):")
-        for i, b in enumerate(self.c_proj_b):
-            print(f"Layer {i}: {tuple(b.shape) if not self.use_cuda else tuple(b.size())}")
-
-        print("\nShapes for mlp_c_fc_w (per layer):")
-        for i, w in enumerate(self.mlp_c_fc_w):
-            print(f"Layer {i}: {tuple(w.shape) if not self.use_cuda else tuple(w.size())}")
-
-        print("\nShapes for mlp_c_fc_b (per layer):")
-        for i, b in enumerate(self.mlp_c_fc_b):
-            print(f"Layer {i}: {tuple(b.shape) if not self.use_cuda else tuple(b.size())}")
-
-        print("\nShapes for mlp_c_proj_w (per layer):")
-        for i, w in enumerate(self.mlp_c_proj_w):
-            print(f"Layer {i}: {tuple(w.shape) if not self.use_cuda else tuple(w.size())}")
-
-        print("\nShapes for mlp_c_proj_b (per layer):")
-        for i, b in enumerate(self.mlp_c_proj_b):
-            print(f"Layer {i}: {tuple(b.shape) if not self.use_cuda else tuple(b.size())}")
-
-        print("\nShape for lm_head_w:")
-        if self.use_cuda:
-            print(tuple(self.lm_head_w.size()))
-        else:
-            print(self.lm_head_w.shape)
+        # ... (打印形状代码不变，可省略以简化)
 
     def _to_torch_state(self, state_np: dict):
-        """如果使用 CUDA，则把 numpy state 转为 torch tensors 并搬到 device；否则直接返回 numpy dict"""
         if not self.use_cuda:
             return state_np
         torch_state = {}
         for k, v in state_np.items():
-            if isinstance(v, np.ndarray):
-                torch_state[k] = torch.from_numpy(v).to(self.device)
-            else:
-                arr = np.asarray(v)
-                if np.issubdtype(arr.dtype, np.floating):
-                    arr = arr.astype(np.float32, copy=False)
-                torch_state[k] = torch.from_numpy(arr).to(self.device)
+            torch_state[k] = torch.from_numpy(np.asarray(v, dtype=np.float32)).to(self.device)
         return torch_state
 
     def _to_numpy_state(self, state_mixed: dict):
-        """把可能为 torch tensors 的 state 转为 numpy（用于返回）"""
         out = {}
         for k, v in state_mixed.items():
             if self.use_cuda and isinstance(v, torch.Tensor):
                 out[k] = v.detach().cpu().numpy()
-            elif isinstance(v, np.ndarray):
-                out[k] = v
             else:
-                if torch is not None and isinstance(v, torch.Tensor):
-                    out[k] = v.detach().cpu().numpy()
-                else:
-                    out[k] = np.asarray(v)
+                out[k] = np.asarray(v)
         return out
 
+    def layer_norm(self, x, weight, bias, eps=1e-5):
+        if self.use_cuda:
+            mean = x.mean(dim=-1, keepdim=True)
+            var = ((x - mean) ** 2).mean(dim=-1, keepdim=True)
+            std = torch.sqrt(var + eps)
+            norm = (x - mean) / std
+            return norm * weight + bias
+        else:
+            mean = x.mean(axis=-1, keepdims=True)
+            var = ((x - mean) ** 2).mean(axis=-1, keepdims=True)
+            std = np.sqrt(var + eps)
+            norm = (x - mean) / std
+            return norm * weight + bias
+
+    def gelu(self, x):
+        if self.use_cuda:
+            return x * 0.5 * (1.0 + torch.tanh(math.sqrt(2 / math.pi) * (x + 0.044715 * torch.pow(x, 3))))
+        else:
+            return x * 0.5 * (1.0 + np.tanh(np.sqrt(2 / np.pi) * (x + 0.044715 * np.power(x, 3))))
+
+    def softmax(self, x, axis=-1):
+        if self.use_cuda:
+            return torch.softmax(x, dim=axis)
+        else:
+            return sp_softmax(x, axis=axis)
+
+
+    def full_forward_all(self, input_hidden, whether_warmup=False):
+        layer_time = {}
+        s = self._to_torch_state({'input': input_hidden})
+        x = s['input']
+        
+        rng = np.random.default_rng(2025)
+        A = sample_A_constructive(d=model_dim, a=6.88, rng=rng)
+        #A_i = torch.inverse(A)
+
+        for layer in range(self.n_layer):
+            st = time.time()
+            # LN1
+            ln1 = self.layer_norm(x, self.ln1_gamma[layer], self.ln1_beta[layer])
+            
+            #if not whether_warmup and layer == 0:
+            #    print(f"------{layer} : ln1------:\n", np.dot(ln1,A_i)[:2,:5])
+            # QKV
+            if self.use_cuda:
+                proj = torch.matmul(ln1, self.c_attn_w[layer]) + self.c_attn_b[layer][None, None, :]
+                B, S, _ = ln1.shape
+                Q = proj[:, :, :self.d_model].reshape(B, S, self.h, self.d_k).permute(0, 2, 1, 3)
+                K = proj[:, :, self.d_model:2*self.d_model].reshape(B, S, self.h, self.d_k).permute(0, 2, 1, 3)
+                V = proj[:, :, 2*self.d_model:].reshape(B, S, self.h, self.d_k).permute(0, 2, 1, 3)
+            else:
+                proj = np.dot(ln1, self.c_attn_w[layer]) + self.c_attn_b[layer][None, None, :]
+                B, S, _ = ln1.shape
+                Q = proj[:, :, :self.d_model].reshape(B, S, self.h, self.d_k).transpose(0, 2, 1, 3)
+                K = proj[:, :, self.d_model:2*self.d_model].reshape(B, S, self.h, self.d_k).transpose(0, 2, 1, 3)
+                V = proj[:, :, 2*self.d_model:].reshape(B, S, self.h, self.d_k).transpose(0, 2, 1, 3)
+
+            # scores + mask
+            if self.use_cuda:
+                scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
+                S_q = Q.shape[2]
+                mask = torch.triu(torch.ones((S_q, S_q), device=self.device) * -1e9, diagonal=1)
+                scores = scores + mask[None, None, :, :]
+            else:
+                scores = np.matmul(Q, K.transpose(0, 1, 3, 2)) / np.sqrt(self.d_k)
+                S_q = Q.shape[2]
+                mask = np.triu(np.ones((S_q, S_q)) * -1e9, k=1)
+                scores += mask[None, None, :, :]
+
+            # softmax
+            attn = self.softmax(scores, axis=-1)
+
+            # attn @ V
+            if self.use_cuda:
+                aout = torch.matmul(attn, V)
+            else:
+                aout = np.matmul(attn, V)
+
+            # c_proj
+            if self.use_cuda:
+                B, H, S_q, d_v = aout.shape
+                aout = aout.permute(0, 2, 1, 3).reshape(B, S_q, self.d_model)
+                attn_out = torch.matmul(aout, self.c_proj_w[layer]) + self.c_proj_b[layer][None, None, :]
+            else:
+                B, H, S_q, d_v = aout.shape
+                aout = aout.transpose(0, 2, 1, 3).reshape(B, S_q, self.d_model)
+                attn_out = np.dot(aout, self.c_proj_w[layer]) + self.c_proj_b[layer][None, None, :]
+
+            # residual after attn
+            attn_residual = x + attn_out
+
+            # LN2
+            ln2 = self.layer_norm(attn_residual, self.ln2_gamma[layer], self.ln2_beta[layer])
+
+            # FF1
+            if self.use_cuda:
+                ff1 = torch.matmul(ln2, self.mlp_c_fc_w[layer]) + self.mlp_c_fc_b[layer][None, None, :]
+            else:
+                ff1 = np.dot(ln2, self.mlp_c_fc_w[layer]) + self.mlp_c_fc_b[layer][None, None, :]
+
+            # GELU
+            gelu = self.gelu(ff1)
+
+            # FF2
+            if self.use_cuda:
+                ff2 = torch.matmul(gelu, self.mlp_c_proj_w[layer]) + self.mlp_c_proj_b[layer][None, None, :]
+            else:
+                ff2 = np.dot(gelu, self.mlp_c_proj_w[layer]) + self.mlp_c_proj_b[layer][None, None, :]
+
+            # final residual
+            x = attn_residual + ff2
+            ed = time.time()
+            layer_time[f"layer {layer}"] = (ed - st) * 1000
+
+        # Final LN (现在在 REE)
+        st = time.time()
+        ln_final = self.layer_norm(x, self.final_gamma, self.final_beta)
+        ed = time.time()
+        layer_time[f"last LN"] = (ed - st) * 1000
+
+        # LM Head (logits)
+        st = time.time()
+        if self.use_cuda:
+            logits = torch.matmul(ln_final, self.lm_head_w)
+        else:
+            logits = np.dot(ln_final, self.lm_head_w)
+        ed = time.time()
+        layer_time[f"logits"] = (ed - st) * 1000
+
+        total_time = 0
+        if whether_warmup == False:
+            for op in layer_time:
+                print(f"{op} cost {layer_time[op]} ms")
+                total_time += layer_time[op]
+            print(f"Total time cost {total_time} ms")
+        return logits
+
     def Process(self, request, context):
+        print("Server start: ", time.time())
         if not hasattr(local_storage, 'all_times'):
             local_storage.all_times = {}
         
         op_id = request.op_id
-        state = state_to_np(request.state)  # numpy dict incoming
-        i = op_id
-        current_layer = i // 100
-
-        # 如果用 cuda，则把 state 一次性转为 torch tensors
-        s = self._to_torch_state(state)
-
-        while True:
-            local_i = i % 100
-
-            if current_layer >= self.n_layer:  # final linear
-                start = time.time()
-                if local_i == 2:
-                    # logits = ln_final @ lm_head_w
-                    if self.use_cuda:
-                        logits = torch.matmul(s['ln_final'], self.lm_head_w)
-                        s['logits'] = logits
-                    else:
-                        s['logits'] = np.dot(s['ln_final'], self.lm_head_w)
-                    end = time.time()  # 结束测量
-                    time_ms = (end - start) * 1000
-                    local_storage.all_times[i] = ('server', time_ms)  # 记录到当前 i
-                    i = 9999
-                break
-            start = time.time()  # 每个操作前测量（除 final 外）
-            if local_i == 2:  # QKV
-                # inp = state['ln1']
-                if self.use_cuda:
-                    inp = s['ln1']  # torch tensor on device
-                    w = self.c_attn_w[current_layer]
-                    b = self.c_attn_b[current_layer]
-                    proj = torch.matmul(inp, w) + b[None, None, :]
-                    B, S, _ = inp.shape
-                    Q = proj[:, :, :self.d_model]
-                    K = proj[:, :, self.d_model:2*self.d_model]
-                    V = proj[:, :, 2*self.d_model:]
-                    # reshape and transpose: (B, S, h, d_k) -> (B, h, S, d_k)
-                    Q = Q.reshape(B, S, self.h, self.d_k).permute(0, 2, 1, 3)
-                    K = K.reshape(B, S, self.h, self.d_k).permute(0, 2, 1, 3)
-                    V = V.reshape(B, S, self.h, self.d_k).permute(0, 2, 1, 3)
-                    s['Q'] = Q
-                    s['K'] = K
-                    s['V'] = V
-                else:
-                    inp = s['ln1']
-                    w = self.c_attn_w[current_layer]
-                    b = self.c_attn_b[current_layer]
-                    proj = np.dot(inp, w) + b[None, None, :]
-                    B, S, _ = inp.shape
-                    Q = proj[:, :, :self.d_model]
-                    K = proj[:, :, self.d_model:2*self.d_model]
-                    V = proj[:, :, 2*self.d_model:]
-                    Q = Q.reshape(B, S, self.h, self.d_k).transpose(0, 2, 1, 3)
-                    K = K.reshape(B, S, self.h, self.d_k).transpose(0, 2, 1, 3)
-                    V = V.reshape(B, S, self.h, self.d_k).transpose(0, 2, 1, 3)
-                    s['Q'] = Q
-                    s['K'] = K
-                    s['V'] = V
-                i += 1
-
-            elif local_i == 3:  # scores + causal mask
-                if self.use_cuda:
-                    scores = torch.matmul(s['Q'], s['K'].transpose(-2, -1)) / math.sqrt(self.d_k)
-                    S_q = s['Q'].shape[2]
-                    # causal mask
-                    mask = torch.triu(torch.ones((S_q, S_q), device=self.device, dtype=scores.dtype), diagonal=1) * -1e9
-                    scores = scores + mask[None, None, :, :]
-                    s['scores'] = scores
-                else:
-                    scores = np.matmul(s['Q'], s['K'].transpose(0, 1, 3, 2)) / np.sqrt(self.d_k)
-                    S_q = s['Q'].shape[2]
-                    mask = np.triu(np.ones((S_q, S_q), dtype=scores.dtype), k=1) * -1e9
-                    scores += mask[None, None, :, :]
-                    s['scores'] = scores
-                i += 1
-
-            elif local_i == 5:
-                # state['aout'] = np.matmul(state['attn'], state['V'])
-                if self.use_cuda:
-                    s['aout'] = torch.matmul(s['attn'], s['V'])
-                else:
-                    s['aout'] = np.matmul(s['attn'], s['V'])
-                i += 1
-
-            elif local_i == 6:
-                # B, H, S_q, d_v = state['aout'].shape
-                if self.use_cuda:
-                    B, H, S_q, d_v = s['aout'].shape
-                    aout = s['aout'].permute(0, 2, 1, 3).reshape(B, S_q, self.d_model)
-                    w = self.c_proj_w[current_layer]
-                    b = self.c_proj_b[current_layer]
-                    # w, b are torch tensors on device
-                    state_attn_out = torch.matmul(aout, w) + b[None, None, :]
-                    s['attn_out'] = state_attn_out
-                else:
-                    B, H, S_q, d_v = s['aout'].shape
-                    aout = s['aout'].transpose(0, 2, 1, 3).reshape(B, S_q, self.d_model)
-                    w = self.c_proj_w[current_layer]
-                    b = self.c_proj_b[current_layer]
-                    s['attn_out'] = np.dot(aout, w) + b[None, None, :]
-                i += 1
-
-            elif local_i == 7:
-                # state['attn_residual'] = state['input'] + state['attn_out']
-                if self.use_cuda:
-                    s['attn_residual'] = s['input'] + s['attn_out']
-                else:
-                    s['attn_residual'] = s['input'] + s['attn_out']
-                i += 1
-
-            elif local_i == 9:
-                # w = self.mlp_c_fc_w[current_layer]
-                # state['ff1'] = np.dot(state['ln2'], w) + b[None, None, :]
-                if self.use_cuda:
-                    w = self.mlp_c_fc_w[current_layer]
-                    b = self.mlp_c_fc_b[current_layer]
-                    s['ff1'] = torch.matmul(s['ln2'], w) + b[None, None, :]
-                else:
-                    w = self.mlp_c_fc_w[current_layer]
-                    b = self.mlp_c_fc_b[current_layer]
-                    s['ff1'] = np.dot(s['ln2'], w) + b[None, None, :]
-                i += 1
-
-            elif local_i == 11:
-                if self.use_cuda:
-                    w = self.mlp_c_proj_w[current_layer]
-                    b = self.mlp_c_proj_b[current_layer]
-                    s['ff2'] = torch.matmul(s['gelu'], w) + b[None, None, :]
-                else:
-                    w = self.mlp_c_proj_w[current_layer]
-                    b = self.mlp_c_proj_b[current_layer]
-                    s['ff2'] = np.dot(s['gelu'], w) + b[None, None, :]
-                i += 1
-
-            elif local_i == 12:
-                # state['output'] = state['attn_residual'] + state['ff2']
-                if self.use_cuda:
-                    s['output'] = s['attn_residual'] + s['ff2']
-                else:
-                    s['output'] = s['attn_residual'] + s['ff2']
-                i += 1
-
-            else:
-                break
-            end = time.time()  # 每个操作后测量（除 final 外）
-            if 'start' in locals():
-                time_ms = (end - start) * 1000
-                local_storage.all_times[i - 1] = ('server', time_ms)  # 归属到刚完成的 i（增前）
-
-        # 在返回之前，把 state（可能含 torch tensors）转为 numpy
-        out_state_np = self._to_numpy_state(s)
+        state = state_to_np(request.state)
         
-        if i == 9999:
-            #print("\n服务端本次输入执行时间统计:")
-            with open('time_server.log', 'w') as f:
-                print(f"{'op_id':>6} | {'Executor':>8} | {'Time (ms)':>10}", file=f)
-                print("-" * 30, file=f)
-                for op_id in sorted(local_storage.all_times.keys()):
-                    executor, time_ms = local_storage.all_times[op_id]
-                    print(f"{op_id:>6} | {executor:>8} | {time_ms:>10.2f}", file=f)
-            # 重置 for 下一个输入
-            local_storage.all_times = {}
+        if op_id == 1000:  # 执行所有 blocks + final LN + logits
+            start = time.time()
+            input_hidden = state['input']
+            logits = self.full_forward_all(input_hidden)
+            end = time.time()
+            local_storage.all_times[op_id] = ('server', (end - start) * 1000)
+            print('server', (end - start) * 1000, "ms")
+            out_state_np = self._to_numpy_state({'logits': logits})
+            print("Server end: ", time.time())
+            return demo_pb2.TransformerResponse(op_id=1001, state=demo_pb2.State(items=np_to_state(out_state_np)), status="ok")
+        elif op_id == 999:
+            start = time.time()
+            input_hidden = state['input']
+            logits = self.full_forward_all(input_hidden, whether_warmup=True)
+            end = time.time()
+            local_storage.all_times[op_id] = ('server', (end - start) * 1000)
+            out_state_np = self._to_numpy_state({'logits': logits})
+            return demo_pb2.TransformerResponse(op_id=1001, state=demo_pb2.State(items=np_to_state(out_state_np)), status="ok")
+            
+
+        # 如果需要写 log
+        with open('time_server.log', 'w') as f:
+            print(f"{'op_id':>6} | {'Executor':>8} | {'Time (ms)':>10}", file=f)
+            print("-" * 30, file=f)
+            for op_id in sorted(local_storage.all_times.keys()):
+                executor, time_ms = local_storage.all_times[op_id]
+                print(f"{op_id:>6} | {executor:>8} | {time_ms:>10.2f}", file=f)
+        local_storage.all_times = {}
         
-        return demo_pb2.TransformerResponse(op_id=i, state=demo_pb2.State(items=np_to_state(out_state_np)), status="ok")
 
 def serve(device_choice: str):
-    global all_times
-    all_times = {}  # 初始化全局字典
-    NNN = 10485760 * 4  # 更大一点，logits 可能大
+    NNN = 10485760 * 4
     options = [
         ('grpc.max_send_message_length', NNN),
         ('grpc.max_receive_message_length', NNN)
@@ -376,7 +369,6 @@ def serve(device_choice: str):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Transformer gRPC server")
-    parser.add_argument('--device', type=str, default='cpu', choices=['cpu', 'cuda'],
-                        help='device to run computations on: "cpu" or "cuda" (requires torch and CUDA).')
+    parser.add_argument('--device', type=str, default='cpu', choices=['cpu', 'cuda'])
     args = parser.parse_args()
-    serve(args.device)
+    serve(args.device) 
