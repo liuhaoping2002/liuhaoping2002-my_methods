@@ -1,14 +1,14 @@
-# server_grpc.py (支持通过 --device 指定 cpu 或 cuda)
 import grpc
 import numpy as np
 import io
 from concurrent import futures
 import demo_pb2
 import demo_pb2_grpc
-from transformers import AutoConfig, GPT2Model
 import argparse
 import math
 import sys
+import time
+import threading
 
 # 可选的 GPU 支持
 try:
@@ -23,7 +23,6 @@ def tensor_to_np(t: demo_pb2.Tensor) -> np.ndarray:
 
 def np_to_tensor(arr: np.ndarray) -> demo_pb2.Tensor:
     buf = io.BytesIO()
-    # 保持原来的 allow_pickle=False
     np.save(buf, arr, allow_pickle=False)
     return demo_pb2.Tensor(
         data=buf.getvalue(),
@@ -37,9 +36,6 @@ def state_to_np(state_pb):
 def np_to_state(state_np):
     return {k: np_to_tensor(v) for k, v in state_np.items()}
 
-import time  # 新增导入 time
-import threading
-# 全局字典，用于收集时间（在 serve 函数中定义）
 local_storage = threading.local()
 
 class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
@@ -67,33 +63,34 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
         self.use_cuda = use_cuda
         self.device = device
 
-        config = AutoConfig.from_pretrained("gpt2")
-        self.n_layer = config.n_layer
-        self.d_model = config.n_embd
-        self.h = config.n_head
+        # 从本地NPZ加载参数（替换原from_pretrained）
+        try:
+            data = np.load('gpt2_server_params.npz')
+        except FileNotFoundError:
+            raise FileNotFoundError("gpt2_server_params.npz not found. Run download_gpt2_params.py first.")
+
+        self.n_layer = int(data['n_layer'][0])
+        self.d_model = data['c_attn_w'].shape[-1] // 3  # 从c_attn_w推断 (d_model * 3)
+        self.h = 12  # GPT-2 small的固定head数，可硬编码或从config推断
         self.d_k = self.d_model // self.h
 
-        # 从 HF 加载模型（torch），然后按原来方式抽权
-        model = GPT2Model.from_pretrained("gpt2")
+        # 加载numpy权重
+        c_attn_w_np = [data['c_attn_w'][i] for i in range(self.n_layer)]
+        c_attn_b_np = [data['c_attn_b'][i] for i in range(self.n_layer)]
 
-        # 先取 numpy 版本（原有实现）
-        c_attn_w_np = [layer.attn.c_attn.weight.detach().cpu().numpy() for layer in model.h]
-        c_attn_b_np = [layer.attn.c_attn.bias.detach().cpu().numpy() for layer in model.h]
+        c_proj_w_np = [data['c_proj_w'][i] for i in range(self.n_layer)]
+        c_proj_b_np = [data['c_proj_b'][i] for i in range(self.n_layer)]
 
-        c_proj_w_np = [layer.attn.c_proj.weight.detach().cpu().numpy() for layer in model.h]
-        c_proj_b_np = [layer.attn.c_proj.bias.detach().cpu().numpy() for layer in model.h]
+        mlp_c_fc_w_np = [data['mlp_c_fc_w'][i] for i in range(self.n_layer)]
+        mlp_c_fc_b_np = [data['mlp_c_fc_b'][i] for i in range(self.n_layer)]
 
-        mlp_c_fc_w_np = [layer.mlp.c_fc.weight.detach().cpu().numpy() for layer in model.h]
-        mlp_c_fc_b_np = [layer.mlp.c_fc.bias.detach().cpu().numpy() for layer in model.h]
+        mlp_c_proj_w_np = [data['mlp_c_proj_w'][i] for i in range(self.n_layer)]
+        mlp_c_proj_b_np = [data['mlp_c_proj_b'][i] for i in range(self.n_layer)]
 
-        mlp_c_proj_w_np = [layer.mlp.c_proj.weight.detach().cpu().numpy() for layer in model.h]
-        mlp_c_proj_b_np = [layer.mlp.c_proj.bias.detach().cpu().numpy() for layer in model.h]
-
-        lm_head_w_np = model.wte.weight.detach().cpu().numpy().T  # (d_model, vocab)
+        lm_head_w_np = data['lm_head_w']
 
         # 根据是否使用 cuda，将权重转换为 torch tensors（并移动到 device）或保持 numpy
         if self.use_cuda:
-            # 转为 torch tensors 并移动到 GPU
             self.c_attn_w = [torch.from_numpy(w).to(self.device) for w in c_attn_w_np]
             self.c_attn_b = [torch.from_numpy(b).to(self.device) for b in c_attn_b_np]
 
@@ -108,7 +105,6 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
 
             self.lm_head_w = torch.from_numpy(lm_head_w_np).to(self.device)
         else:
-            # 保持 numpy 版本（原样）
             self.c_attn_w = c_attn_w_np
             self.c_attn_b = c_attn_b_np
 
@@ -125,44 +121,6 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
 
         print("Device chosen:", "cuda" if self.use_cuda else "cpu")
         print("Number of layers:", self.n_layer)
-        # 打印形状（与原先保持一致）
-        print("\nShapes for c_attn_w (per layer):")
-        for i, w in enumerate(self.c_attn_w):
-            print(f"Layer {i}: {tuple(w.shape) if not self.use_cuda else tuple(w.size())}")
-
-        print("\nShapes for c_attn_b (per layer):")
-        for i, b in enumerate(self.c_attn_b):
-            print(f"Layer {i}: {tuple(b.shape) if not self.use_cuda else tuple(b.size())}")
-
-        print("\nShapes for c_proj_w (per layer):")
-        for i, w in enumerate(self.c_proj_w):
-            print(f"Layer {i}: {tuple(w.shape) if not self.use_cuda else tuple(w.size())}")
-
-        print("\nShapes for c_proj_b (per layer):")
-        for i, b in enumerate(self.c_proj_b):
-            print(f"Layer {i}: {tuple(b.shape) if not self.use_cuda else tuple(b.size())}")
-
-        print("\nShapes for mlp_c_fc_w (per layer):")
-        for i, w in enumerate(self.mlp_c_fc_w):
-            print(f"Layer {i}: {tuple(w.shape) if not self.use_cuda else tuple(w.size())}")
-
-        print("\nShapes for mlp_c_fc_b (per layer):")
-        for i, b in enumerate(self.mlp_c_fc_b):
-            print(f"Layer {i}: {tuple(b.shape) if not self.use_cuda else tuple(b.size())}")
-
-        print("\nShapes for mlp_c_proj_w (per layer):")
-        for i, w in enumerate(self.mlp_c_proj_w):
-            print(f"Layer {i}: {tuple(w.shape) if not self.use_cuda else tuple(w.size())}")
-
-        print("\nShapes for mlp_c_proj_b (per layer):")
-        for i, b in enumerate(self.mlp_c_proj_b):
-            print(f"Layer {i}: {tuple(b.shape) if not self.use_cuda else tuple(b.size())}")
-
-        print("\nShape for lm_head_w:")
-        if self.use_cuda:
-            print(tuple(self.lm_head_w.size()))
-        else:
-            print(self.lm_head_w.shape)
 
     def _to_torch_state(self, state_np: dict):
         """如果使用 CUDA，则把 numpy state 转为 torch tensors 并搬到 device；否则直接返回 numpy dict"""
@@ -258,6 +216,7 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
                     s['K'] = K
                     s['V'] = V
                 i += 1
+                break
 
             elif local_i == 3:  # scores + causal mask
                 if self.use_cuda:
@@ -281,7 +240,8 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
                     s['aout'] = torch.matmul(s['attn'], s['V'])
                 else:
                     s['aout'] = np.matmul(s['attn'], s['V'])
-                i += 1
+                #i += 1
+                break
 
             elif local_i == 6:
                 # B, H, S_q, d_v = state['aout'].shape
@@ -300,14 +260,8 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
                     b = self.c_proj_b[current_layer]
                     s['attn_out'] = np.dot(aout, w) + b[None, None, :]
                 i += 1
+                break
 
-            elif local_i == 7:
-                # state['attn_residual'] = state['input'] + state['attn_out']
-                if self.use_cuda:
-                    s['attn_residual'] = s['input'] + s['attn_out']
-                else:
-                    s['attn_residual'] = s['input'] + s['attn_out']
-                i += 1
 
             elif local_i == 9:
                 # w = self.mlp_c_fc_w[current_layer]
@@ -333,14 +287,6 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
                     s['ff2'] = np.dot(s['gelu'], w) + b[None, None, :]
                 i += 1
 
-            elif local_i == 12:
-                # state['output'] = state['attn_residual'] + state['ff2']
-                if self.use_cuda:
-                    s['output'] = s['attn_residual'] + s['ff2']
-                else:
-                    s['output'] = s['attn_residual'] + s['ff2']
-                i += 1
-
             else:
                 break
             end = time.time()  # 每个操作后测量（除 final 外）
@@ -348,7 +294,6 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
                 time_ms = (end - start) * 1000
                 local_storage.all_times[i - 1] = ('server', time_ms)  # 归属到刚完成的 i（增前）
 
-        # 在返回之前，把 state（可能含 torch tensors）转为 numpy
         out_state_np = self._to_numpy_state(s)
         
         if i == 9999:
@@ -367,7 +312,7 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
 def serve(device_choice: str):
     global all_times
     all_times = {}  # 初始化全局字典
-    NNN = 10485760 * 4  # 更大一点，logits 可能大
+    NNN = 10485760 * 4
     options = [
         ('grpc.max_send_message_length', NNN),
         ('grpc.max_receive_message_length', NNN)

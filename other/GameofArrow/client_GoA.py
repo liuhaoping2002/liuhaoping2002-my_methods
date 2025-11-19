@@ -1,11 +1,10 @@
-# client_grpc.py (完整可运行版，支持完整GPT-2 Small推理)
 import grpc
 import numpy as np
 import io
 import time
 import demo_pb2
 import demo_pb2_grpc
-from transformers import AutoConfig, GPT2Model, AutoTokenizer
+from transformers import AutoTokenizer
 from scipy.special import softmax as sp_softmax
 
 def time_cost(outputs, time_past):
@@ -43,6 +42,13 @@ def layer_norm(x, weight, bias, eps=1e-5):
     norm = (x - mean) / std
     return norm * weight + bias
 
+def permutation_from_key(key: str, n: int = 4096):
+    rng = np.random.RandomState(hash(key) % (2**32))
+    arr = np.arange(n)
+    rng.shuffle(arr)
+    return arr
+
+
 class TransformerClient:
     def __init__(self):
         # 加载所有参数从单一.npz（原代码不变）
@@ -67,7 +73,25 @@ class TransformerClient:
         
         # 新增：假设hidden_size（GPT-2 small: 768）
         self.hidden_size = 768
+        self.head_num = 12
+        self.head_dim = self.hidden_size//self.head_num
         
+        self.obf1 = np.random.rand(self.hidden_size, 1)
+        self.seq_len = 1
+        self.obf2 = np.random.rand(self.seq_len, 1)
+        self.perm1 = permutation_from_key(key="perm1", n=self.hidden_size)
+        self.perm2 = permutation_from_key(key="perm2", n=self.seq_len)
+        self.perm3 = permutation_from_key(key="perm3", n=self.head_dim)
+        self.perm4 = permutation_from_key(key="perm4", n=self.hidden_size*4)
+        self.ir1 = np.random.rand(self.seq_len, self.hidden_size)
+        self.ir2 = np.random.rand(self.seq_len, self.seq_len)
+        self.v1 = np.random.rand(1, self.hidden_size)
+        self.v2 = np.random.rand(1, self.seq_len)
+        self.v4 = np.random.rand(1, self.hidden_size*4)
+        self.D1 = np.diag(np.random.randn(self.hidden_size)).reshape(self.head_num, self.head_dim, self.hidden_size) # d*d维对角
+        self.D2 = np.diag(np.random.randn(self.seq_len))
+        self.D3 = np.diag(np.random.randn(self.hidden_size))
+        self.D4 = np.diag(np.random.randn(self.hidden_size*4))
         # 新增：全局warmup，在初始化时预热所有操作类型（不计入时间测量）
         self._warmup_operations()
 
@@ -102,15 +126,85 @@ class TransformerClient:
             return 1202, state
 
         while True:
+            print(f"i:{i}   state:{list(state.keys())}")
             if local_i == 1:  # LN1
+                
+                
+                
                 gamma = self.ln1_gamma[current_layer]
                 beta = self.ln1_beta[current_layer]
                 state['ln1'] = layer_norm(state['input'], gamma, beta)
                 i += 1
                 local_i += 1
+                
+            elif local_i ==3:
+                # 返回后对KQV去混淆后再混淆
+                st = time.time()
+                #Qobf = self.ir1@self.obf1@(np.ones((1, self.hidden_size)))+self.ir1[:,self.perm1]
+                #Kobf = self.ir1@self.obf1@(np.ones((1, self.hidden_size)))+self.ir1[:,self.perm1]
+                #Vobf = self.ir1@self.obf1@(np.ones((1, self.hidden_size)))+self.ir1[:,self.perm1]
+                obf1 = self.obf1.reshape(self.head_num, self.head_dim ,1)
+                Q_reobf = state['Q']@obf1@(np.ones((1, self.head_dim)))+(state['Q']@self.D1)[:, :, :, self.perm3]
+                K_reobf = state['K']@obf1@(np.ones((1, self.head_dim)))+(state['K']@self.D1)[:, :, :, self.perm3]
+                V_reobf = state['V']@obf1@(np.ones((1, self.head_dim)))+(state['V']@self.D1)[:, :, :, self.perm3]
+                Qobf = Q_reobf@obf1@(np.ones((1, self.head_dim)))+(Q_reobf@self.D1)[:, :, :, self.perm3]
+                Kobf = K_reobf@obf1@(np.ones((1, self.head_dim)))+(K_reobf@self.D1)[:, :, :, self.perm3]
+                Vobf = V_reobf@obf1@(np.ones((1, self.head_dim)))+(V_reobf@self.D1)[:, :, :, self.perm3]
+                state['Q']=Qobf
+                state['K']=Kobf
+                state['V']=Vobf
+                et = time.time()
+                print(f"obf QKV cost {(et-st)*1000} ms")
+                break
+                
 
             elif local_i == 4:  # softmax
-                state['attn'] = sp_softmax(state['scores'], axis=-1)
+                st = time.time()
+                K_ori = (state['K'].transpose(0, 2, 1, 3).reshape(1, self.seq_len, self.hidden_size)).transpose(0, 2, 1)
+                Q_ori = (state['Q'].transpose(0, 2, 1, 3).reshape(1, self.seq_len, self.hidden_size)).transpose(0, 2, 1)
+                
+                K_reobf = self.D2@np.ones((self.seq_len, 1))@self.v1@K_ori@self.D2
+                Q_reobf = self.D2@np.ones((self.seq_len, 1))@self.v1@Q_ori@self.D2
+                
+                score_reobf = (self.D2@(state['scores']-K_reobf-Q_reobf)@self.D2)[:, :, self.perm2]
+                
+                #state['attn'] = sp_softmax(score_reobf, axis=-1)
+                attn = sp_softmax(score_reobf, axis=-1)
+                one_expand = np.expand_dims(np.expand_dims(np.ones((self.seq_len, 1)), axis=0), axis=0)
+                obf_expand = np.expand_dims(np.expand_dims(self.v2, axis=0), axis=0)
+                attn_obf = np.matmul(np.matmul(attn, one_expand), obf_expand)
+                state['attn'] = attn_obf
+                
+                et = time.time()
+                print(f"obf Attention cost {(et-st)*1000} ms")
+                
+                i += 1
+                local_i += 1
+                break
+
+            elif local_i == 5:
+                # pos5
+                st = time.time()
+
+                V_ori = (state['V'].transpose(0, 2, 1, 3).reshape(1, self.seq_len, self.hidden_size))
+                V_reobf = self.D2@np.ones((self.seq_len, 1))@self.v2@V_ori@self.D3
+                Vp = V_reobf.reshape(1,self.seq_len, self.head_num, self.head_dim).transpose(0, 2, 1, 3)
+                attn_ori = (state['attn'].transpose(0, 2, 1, 3).reshape(1, self.seq_len, self.head_num*self.seq_len))
+                attn_reobf = self.D2@np.ones((self.seq_len, 1))@self.v2@attn_ori
+                aout_reobf = (self.D2@(state['aout']-Vp))[:, :,  :, self.perm3]
+                et = time.time()
+                print(f"VW_0 cost {(et-st)*1000} ms")
+                i += 1
+                local_i += 1
+                break
+                
+            elif local_i == 7:
+                attn_out = state['attn_out']
+                aout_reshape = state['aout'].transpose(0, 2, 1, 3).reshape(1, self.seq_len, self.hidden_size)
+                
+                attn_out_deobf = attn_out@self.D3[ :, self.perm1] - aout_reshape@self.v1.T@np.ones((1, self.hidden_size))@self.D3
+                #print((attn_out_deobf).shape)
+                state['attn_residual'] = state['input'] + attn_out_deobf
                 i += 1
                 local_i += 1
 
@@ -120,13 +214,28 @@ class TransformerClient:
                 state['ln2'] = layer_norm(state['attn_residual'], gamma, beta)
                 i += 1
                 local_i += 1
+            
 
             elif local_i == 10:  # GELU
                 x = state['ff1']
-                state['gelu'] = x * 0.5 * (1.0 + np.tanh(np.sqrt(2.0 / np.pi) * (x + 0.044715 * np.power(x, 3))))
+                
+                gelu_deobf = x@self.D4[ :, self.perm4] - state['ln2']@self.v1.T@np.ones((1, self.hidden_size*4))@self.D4
+                
+                
+                state['gelu'] = gelu_deobf * 0.5 * (1.0 + np.tanh(np.sqrt(2.0 / np.pi) * (gelu_deobf + 0.044715 * np.power(gelu_deobf, 3))))
                 i += 1
                 local_i += 1
 
+            elif local_i == 12:
+                # state['output'] = state['attn_residual'] + state['ff2'].
+                ff2_out = state['ff2']
+                
+                ff2_out_deobf = ff2_out@self.D3[ :, self.perm1] - state['gelu']@self.v4.T@np.ones((1, self.hidden_size))@self.D3
+                
+                state['output'] = state['attn_residual'] + ff2_out_deobf
+                i += 1
+                local_i += 1
+            
             else:
                 break
         return i, state
@@ -137,6 +246,12 @@ def perform_inference(client, stub, input_text, collect_times=True):
     seq_len = input_ids.shape[1]
 
     hidden = client.wte[input_ids] + client.wpe[np.arange(seq_len)]
+    
+    client.seq_len = hidden.shape[1]
+    client.obf2 = np.random.rand(client.seq_len, 1)
+    client.perm2 = permutation_from_key(key="perm2", n=client.seq_len)
+    client.D2 = np.diag(np.random.randn(client.seq_len))
+    client.v2 = np.random.rand(1, client.seq_len)
 
     state = {'input': hidden.astype(np.float32)}
     
@@ -191,7 +306,7 @@ def perform_inference(client, stub, input_text, collect_times=True):
     logits = state['logits']
 
     if collect_times:
-        print(f"Logits shape: {logits.shape}")
+        #print(f"Logits shape: {logits.shape}")
         next_token_id = int(np.argmax(logits[0, -1, :]))
         print(f"Next token: '{client.tokenizer.decode(next_token_id)}'")
         end_time = time.time()
@@ -220,16 +335,18 @@ def run():
     client = TransformerClient()
     
     # Warmup: 运行几次dummy推理来预热整个管道，包括通信（不收集时间）
-    warmup_runs = 2  # 可根据需要调整
-    print(f"Performing {warmup_runs} warmup runs...")
+    warmup_runs = 1  # 可根据需要调整
+    #print(f"Performing {warmup_runs} warmup runs...")
     for _ in range(warmup_runs):
         _ = perform_inference(client, stub, "Warmup input", collect_times=False)  # 用短输入预热
-    print("Warmup completed.")
-    
+    #print("Warmup completed.")
+    time_count = time_cost("warm up", time_count)
     # 实际运行并收集时间
     input_text = "The capital of France is"
     time_count = time_cost("Tokenizer", time_count)  # 原tokenizer时间（实际运行前）
     _ = perform_inference(client, stub, input_text, collect_times=True)
 
 if __name__ == '__main__':
+    #for i in range(0,10):
+    #    print(f"--------------{i}------------------")
     run()
