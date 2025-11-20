@@ -188,7 +188,7 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
 
         while True:
             local_i = i % 100
-            #print(f"i={i}")
+            print(f"i={i}")
 
             if current_layer >= self.n_layer:  # final linear
                 start = time.time()
