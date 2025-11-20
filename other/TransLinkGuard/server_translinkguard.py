@@ -120,8 +120,8 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
             self.mlp_c_proj_b = [torch.from_numpy(b).to(self.device) for b in mlp_c_proj_b_np]
 
             self.lm_head_w = torch.from_numpy(lm_head_w_np).to(self.device)
-            self.ln2_gamma = torch.from_numpy(ln2_gamma).to(self.device)
-            self.ln2_beta = torch.from_numpy(ln2_beta).to(self.device)
+            self.ln2_gamma = [torch.from_numpy(w).to(self.device) for w in ln2_gamma]
+            self.ln2_beta = [torch.from_numpy(w).to(self.device) for w in ln2_beta]
             
         else:
             self.c_attn_w = c_attn_w_np
