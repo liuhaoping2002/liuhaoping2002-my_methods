@@ -102,8 +102,7 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
 
         lm_head_w_np = data['lm_head_w']
         
-        ln2_gamma = [data_c['ln2_gamma'][i] for i in range(self.n_layer)]
-        ln2_beta = [data_c['ln2_beta'][i] for i in range(self.n_layer)]
+
 
         # 根据是否使用 cuda，将权重转换为 torch tensors（并移动到 device）或保持 numpy
         if self.use_cuda:
@@ -120,8 +119,6 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
             self.mlp_c_proj_b = [torch.from_numpy(b).to(self.device) for b in mlp_c_proj_b_np]
 
             self.lm_head_w = torch.from_numpy(lm_head_w_np).to(self.device)
-            self.ln2_gamma = [torch.from_numpy(w).to(self.device) for w in ln2_gamma]
-            self.ln2_beta = [torch.from_numpy(w).to(self.device) for w in ln2_beta]
             
         else:
             self.c_attn_w = c_attn_w_np
@@ -138,9 +135,6 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
 
             self.lm_head_w = lm_head_w_np
             
-            self.ln2_gamma = ln2_gamma
-            self.ln2_beta = ln2_beta
-
         print("Device chosen:", "cuda" if self.use_cuda else "cpu")
         print("Number of layers:", self.n_layer)
 
@@ -256,15 +250,7 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
                     s['scores'] = scores
                 i += 1
                 
-            elif local_i == 4:  # softmax
-                if self.use_cuda:
-                    # 对 'scores' 进行 softmax 操作，计算注意力分数
-                    s['attn'] = torch.softmax(s['scores'], dim=-1)
-                else:
-                    # 非 CUDA 版本，使用 numpy 进行 softmax 操作
-                    s['attn'] = sp_softmax(s['scores'], axis=-1)
-                i += 1
-            
+
             elif local_i == 5:
                 # state['aout'] = np.matmul(state['attn'], state['V'])
                 if self.use_cuda:
@@ -279,14 +265,6 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
                 s['attn_residual'] = s['input'] + s['attn_out']
                 i += 1
                 
-            elif local_i == 8:  # LN2
-                gamma = self.ln2_gamma[current_layer]
-                beta = self.ln2_beta[current_layer]               
-                if self.use_cuda:
-                    s['ln2'] = torch.nn.functional.layer_norm(input=s['attn_residual'], normalized_shape=self.d_model, weight=gamma, bias=beta)
-                else:   
-                    s['ln2'] = layer_norm(s['attn_residual'], gamma, beta)
-                i += 1
 
             elif local_i == 9:
                 # w = self.mlp_c_fc_w[current_layer]

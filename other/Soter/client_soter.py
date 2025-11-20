@@ -60,6 +60,8 @@ class TransformerClient:
         # 切分栈数组回列表（原代码不变）
         self.ln1_gamma = [data['ln1_gamma'][i] for i in range(self.n_layer)]
         self.ln1_beta = [data['ln1_beta'][i] for i in range(self.n_layer)]
+        self.ln2_gamma = [data['ln2_gamma'][i] for i in range(self.n_layer)]
+        self.ln2_beta = [data['ln2_beta'][i] for i in range(self.n_layer)]
         
         self.final_gamma = data['final_gamma']
         self.final_beta = data['final_beta']
@@ -121,6 +123,16 @@ class TransformerClient:
                 
                 i += 1
                 local_i += 1
+                
+            elif local_i == 4:  # softmax
+                state['attn'] = sp_softmax(state['scores'], axis=-1)
+                
+                obf_ir = self.scale*state['attn']
+                obf_ir = self.scale*state['scores']
+                
+                i += 1
+                local_i += 1
+            
 
             elif local_i == 6:
                 # B, H, S_q, d_v = state['aout'].shape
@@ -132,6 +144,17 @@ class TransformerClient:
                 
                 obf_ir = self.scale*state['aout']
                 obf_ir = self.scale*state['attn_out']
+                
+                i += 1
+                local_i += 1
+
+            elif local_i == 8:  # LN2
+                gamma = self.ln2_gamma[current_layer]
+                beta = self.ln2_beta[current_layer]               
+                state['ln2'] = layer_norm(state['attn_residual'], gamma, beta)
+                
+                obf_ir = self.scale*state['ln2']
+                obf_ir = self.scale*state['attn_residual']                
                 
                 i += 1
                 local_i += 1
