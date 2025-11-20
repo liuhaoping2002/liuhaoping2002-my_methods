@@ -74,11 +74,7 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
 
         self.use_cuda = use_cuda
         self.device = device
-
-        if self.use_cuda:
-            dummy = torch.tensor([1.0], device=self.device)
-            dummy = dummy * 2.0
-            torch.cuda.synchronize()  # 确保完成
+        
         # 从本地NPZ加载参数（替换原from_pretrained）
         try:
             data = np.load('gpt2_server_params.npz')
