@@ -300,7 +300,7 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
                 gamma = self.ln2_gamma[current_layer]
                 beta = self.ln2_beta[current_layer]               
                 if self.use_cuda:
-                    s['ln2'] = torch.nn.functional.layer_norm(input=s['attn_residual'], weight=gamma, bias=beta)
+                    s['ln2'] = torch.nn.functional.layer_norm(input=s['attn_residual'], normalized_shape=self.d_model, weight=gamma, bias=beta)
                 else:   
                     s['ln2'] = layer_norm(s['attn_residual'], gamma, beta)
                 i += 1
