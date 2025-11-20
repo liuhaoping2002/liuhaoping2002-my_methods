@@ -298,8 +298,11 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
                 
             elif local_i == 8:  # LN2
                 gamma = self.ln2_gamma[current_layer]
-                beta = self.ln2_beta[current_layer]
-                s['ln2'] = layer_norm(s['attn_residual'], gamma, beta)
+                beta = self.ln2_beta[current_layer]               
+                if self.use_cuda:
+                    s['ln2'] = torch.nn.functional.layer_norm(input=s['attn_residual'], weight=gamma, bias=beta)
+                else:   
+                    s['ln2'] = layer_norm(s['attn_residual'], gamma, beta)
                 i += 1
 
             elif local_i == 9:
