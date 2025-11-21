@@ -1,0 +1,34 @@
+// demo.proto
+syntax = "proto3";
+
+package transformer;
+
+// 表示一个张量（NumPy 数组）
+message Tensor {
+  bytes data = 1;           // np.save() 序列化后的字节
+  repeated int64 shape = 2; // 形状，如 [2, 64, 64]
+  string dtype = 3;         // 数据类型，如 "float32"
+}
+
+// 状态字典：字符串 key -> Tensor
+message State {
+  map<string, Tensor> items = 1;
+}
+
+// 客户端 → 服务端 请求
+message TransformerRequest {
+  int32 op_id = 1;          // 当前操作序号
+  State state = 2;          // 当前中间状态
+}
+
+// 服务端 → 客户端 响应
+message TransformerResponse {
+  int32 op_id = 1;          // 下一个操作序号
+  State state = 2;          // 更新后的中间状态
+  string status = 3;        // 状态信息，如 "ok"
+}
+
+// gRPC 服务定义
+service TransformerService {
+  rpc Process(TransformerRequest) returns (TransformerResponse);
+}
