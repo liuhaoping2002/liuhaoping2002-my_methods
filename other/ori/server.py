@@ -178,7 +178,7 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
 
             while True:
                 local_i = i % 100
-                print(f"i:{i}   state:{list(state.keys())}")
+                #print(f"i:{i}   state:{list(s.keys())}")
                 
                 # Final Linear
                 if i >= 1202: # Client 发送 1202
@@ -309,6 +309,7 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
         # 在返回之前，把 state（可能含 torch tensors）转为 numpy
         #out_state_np = self._to_numpy_state(s)
         out_state_np = self._to_numpy_state(response_state)
+        #print(f"{i} outstate : {list(out_state_np.keys())}")
         
         if i == 9999:
             #print("\n服务端本次输入执行时间统计:")
