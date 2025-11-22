@@ -162,156 +162,153 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
         
         op_id = request.op_id
         state = state_to_np(request.state)  # numpy dict incoming
-        i = op_id
-        current_layer = i // 100
+        if self.use_cuda:
+             context_manager = torch.no_grad()
+        else:
+             import contextlib
+             context_manager = contextlib.nullcontext()
 
-        # 如果用 cuda，则把 state 一次性转为 torch tensors
-        s = self._to_torch_state(state)
+        with context_manager:
+            i = op_id
+            current_layer = i // 100
+            s = self._to_torch_state(state)
+            
+            # 用于存放要返回给 Client 的结果
+            response_state = {}
 
-        while True:
-            local_i = i % 100
-
-            if current_layer >= self.n_layer:  # final linear
-                start = time.time()
-                if local_i == 2:
-                    # logits = ln_final @ lm_head_w
+            while True:
+                local_i = i % 100
+                print(f"i:{i}   state:{list(state.keys())}")
+                
+                # Final Linear
+                if i >= 1202: # Client 发送 1202
+                        # Logits calc
+                        if self.use_cuda:
+                            logits = torch.matmul(s['ln_final'], self.lm_head_w)
+                        else:
+                            logits = np.dot(s['ln_final'], self.lm_head_w)
+                        response_state['logits'] = logits
+                        i = 9999
+                        break
+                if local_i == 2:  # QKV
+                    # inp = state['ln1']
                     if self.use_cuda:
-                        logits = torch.matmul(s['ln_final'], self.lm_head_w)
-                        s['logits'] = logits
+                        inp = s['ln1']  # torch tensor on device
+                        w = self.c_attn_w[current_layer]
+                        b = self.c_attn_b[current_layer]
+                        proj = torch.matmul(inp, w) + b[None, None, :]
+                        B, S, _ = inp.shape
+                        Q = proj[:, :, :self.d_model]
+                        K = proj[:, :, self.d_model:2*self.d_model]
+                        V = proj[:, :, 2*self.d_model:]
+                        # reshape and transpose: (B, S, h, d_k) -> (B, h, S, d_k)
+                        Q = Q.reshape(B, S, self.h, self.d_k).permute(0, 2, 1, 3)
+                        K = K.reshape(B, S, self.h, self.d_k).permute(0, 2, 1, 3)
+                        V = V.reshape(B, S, self.h, self.d_k).permute(0, 2, 1, 3)
+                        s['Q'] = Q
+                        s['K'] = K
+                        s['V'] = V
                     else:
-                        s['logits'] = np.dot(s['ln_final'], self.lm_head_w)
-                    end = time.time()  # 结束测量
-                    time_ms = (end - start) * 1000
-                    local_storage.all_times[i] = ('server', time_ms)  # 记录到当前 i
-                    i = 9999
-                break
-            start = time.time()  # 每个操作前测量（除 final 外）
-            if local_i == 2:  # QKV
-                # inp = state['ln1']
-                if self.use_cuda:
-                    inp = s['ln1']  # torch tensor on device
-                    w = self.c_attn_w[current_layer]
-                    b = self.c_attn_b[current_layer]
-                    proj = torch.matmul(inp, w) + b[None, None, :]
-                    B, S, _ = inp.shape
-                    Q = proj[:, :, :self.d_model]
-                    K = proj[:, :, self.d_model:2*self.d_model]
-                    V = proj[:, :, 2*self.d_model:]
-                    # reshape and transpose: (B, S, h, d_k) -> (B, h, S, d_k)
-                    Q = Q.reshape(B, S, self.h, self.d_k).permute(0, 2, 1, 3)
-                    K = K.reshape(B, S, self.h, self.d_k).permute(0, 2, 1, 3)
-                    V = V.reshape(B, S, self.h, self.d_k).permute(0, 2, 1, 3)
-                    s['Q'] = Q
-                    s['K'] = K
-                    s['V'] = V
-                else:
-                    inp = s['ln1']
-                    w = self.c_attn_w[current_layer]
-                    b = self.c_attn_b[current_layer]
-                    proj = np.dot(inp, w) + b[None, None, :]
-                    B, S, _ = inp.shape
-                    Q = proj[:, :, :self.d_model]
-                    K = proj[:, :, self.d_model:2*self.d_model]
-                    V = proj[:, :, 2*self.d_model:]
-                    Q = Q.reshape(B, S, self.h, self.d_k).transpose(0, 2, 1, 3)
-                    K = K.reshape(B, S, self.h, self.d_k).transpose(0, 2, 1, 3)
-                    V = V.reshape(B, S, self.h, self.d_k).transpose(0, 2, 1, 3)
-                    s['Q'] = Q
-                    s['K'] = K
-                    s['V'] = V
-                i += 1
+                        inp = s['ln1']
+                        w = self.c_attn_w[current_layer]
+                        b = self.c_attn_b[current_layer]
+                        proj = np.dot(inp, w) + b[None, None, :]
+                        B, S, _ = inp.shape
+                        Q = proj[:, :, :self.d_model]
+                        K = proj[:, :, self.d_model:2*self.d_model]
+                        V = proj[:, :, 2*self.d_model:]
+                        Q = Q.reshape(B, S, self.h, self.d_k).transpose(0, 2, 1, 3)
+                        K = K.reshape(B, S, self.h, self.d_k).transpose(0, 2, 1, 3)
+                        V = V.reshape(B, S, self.h, self.d_k).transpose(0, 2, 1, 3)
+                        s['Q'] = Q
+                        s['K'] = K
+                        s['V'] = V
+                    i += 1
 
-            elif local_i == 3:  # scores + causal mask
-                if self.use_cuda:
-                    scores = torch.matmul(s['Q'], s['K'].transpose(-2, -1)) / math.sqrt(self.d_k)
-                    S_q = s['Q'].shape[2]
-                    # causal mask
-                    mask = torch.triu(torch.ones((S_q, S_q), device=self.device, dtype=scores.dtype), diagonal=1) * -1e9
-                    scores = scores + mask[None, None, :, :]
-                    s['scores'] = scores
-                else:
-                    scores = np.matmul(s['Q'], s['K'].transpose(0, 1, 3, 2)) / np.sqrt(self.d_k)
-                    S_q = s['Q'].shape[2]
-                    mask = np.triu(np.ones((S_q, S_q), dtype=scores.dtype), k=1) * -1e9
-                    scores += mask[None, None, :, :]
-                    s['scores'] = scores
-                i += 1
+                elif local_i == 3:  # scores + causal mask
+                    if self.use_cuda:
+                        scores = torch.matmul(s['Q'], s['K'].transpose(-2, -1)) / math.sqrt(self.d_k)
+                        S_q = s['Q'].shape[2]
+                        # causal mask
+                        mask = torch.triu(torch.ones((S_q, S_q), device=self.device, dtype=scores.dtype), diagonal=1) * -1e9
+                        scores = scores + mask[None, None, :, :]
+                        s['scores'] = scores
+                    else:
+                        scores = np.matmul(s['Q'], s['K'].transpose(0, 1, 3, 2)) / np.sqrt(self.d_k)
+                        S_q = s['Q'].shape[2]
+                        mask = np.triu(np.ones((S_q, S_q), dtype=scores.dtype), k=1) * -1e9
+                        scores += mask[None, None, :, :]
+                        s['scores'] = scores
+                    response_state['scores'] = scores
+                    response_state['V'] = V # V 需要 Client 暂存，下一步发回来
+                    i += 1
 
-            elif local_i == 5:
-                # state['aout'] = np.matmul(state['attn'], state['V'])
-                if self.use_cuda:
-                    s['aout'] = torch.matmul(s['attn'], s['V'])
-                else:
-                    s['aout'] = np.matmul(s['attn'], s['V'])
-                i += 1
+                elif local_i == 5:
+                    # state['aout'] = np.matmul(state['attn'], state['V'])
+                    if self.use_cuda:
+                        s['aout'] = torch.matmul(s['attn'], s['V'])
+                    else:
+                        s['aout'] = np.matmul(s['attn'], s['V'])
 
-            elif local_i == 6:
-                # B, H, S_q, d_v = state['aout'].shape
-                if self.use_cuda:
-                    B, H, S_q, d_v = s['aout'].shape
-                    aout = s['aout'].permute(0, 2, 1, 3).reshape(B, S_q, self.d_model)
-                    w = self.c_proj_w[current_layer]
-                    b = self.c_proj_b[current_layer]
-                    # w, b are torch tensors on device
-                    state_attn_out = torch.matmul(aout, w) + b[None, None, :]
-                    s['attn_out'] = state_attn_out
-                else:
-                    B, H, S_q, d_v = s['aout'].shape
-                    aout = s['aout'].transpose(0, 2, 1, 3).reshape(B, S_q, self.d_model)
-                    w = self.c_proj_w[current_layer]
-                    b = self.c_proj_b[current_layer]
-                    s['attn_out'] = np.dot(aout, w) + b[None, None, :]
-                i += 1
+                    i += 1
 
-            elif local_i == 7:
-                # state['attn_residual'] = state['input'] + state['attn_out']
-                if self.use_cuda:
-                    s['attn_residual'] = s['input'] + s['attn_out']
-                else:
-                    s['attn_residual'] = s['input'] + s['attn_out']
-                i += 1
+                elif local_i == 6:
+                    # B, H, S_q, d_v = state['aout'].shape
+                    if self.use_cuda:
+                        B, H, S_q, d_v = s['aout'].shape
+                        aout = s['aout'].permute(0, 2, 1, 3).reshape(B, S_q, self.d_model)
+                        w = self.c_proj_w[current_layer]
+                        b = self.c_proj_b[current_layer]
+                        # w, b are torch tensors on device
+                        state_attn_out = torch.matmul(aout, w) + b[None, None, :]
+                        s['attn_out'] = state_attn_out
+                    else:
+                        B, H, S_q, d_v = s['aout'].shape
+                        aout = s['aout'].transpose(0, 2, 1, 3).reshape(B, S_q, self.d_model)
+                        w = self.c_proj_w[current_layer]
+                        b = self.c_proj_b[current_layer]
+                        s['attn_out'] = np.dot(aout, w) + b[None, None, :]
+                    response_state['attn_out'] = s['attn_out']
+                    i += 1
 
-            elif local_i == 9:
-                # w = self.mlp_c_fc_w[current_layer]
-                # state['ff1'] = np.dot(state['ln2'], w) + b[None, None, :]
-                if self.use_cuda:
-                    w = self.mlp_c_fc_w[current_layer]
-                    b = self.mlp_c_fc_b[current_layer]
-                    s['ff1'] = torch.matmul(s['ln2'], w) + b[None, None, :]
-                else:
-                    w = self.mlp_c_fc_w[current_layer]
-                    b = self.mlp_c_fc_b[current_layer]
-                    s['ff1'] = np.dot(s['ln2'], w) + b[None, None, :]
-                i += 1
 
-            elif local_i == 11:
-                if self.use_cuda:
-                    w = self.mlp_c_proj_w[current_layer]
-                    b = self.mlp_c_proj_b[current_layer]
-                    s['ff2'] = torch.matmul(s['gelu'], w) + b[None, None, :]
-                else:
-                    w = self.mlp_c_proj_w[current_layer]
-                    b = self.mlp_c_proj_b[current_layer]
-                    s['ff2'] = np.dot(s['gelu'], w) + b[None, None, :]
-                i += 1
+                elif local_i == 9:
+                    # w = self.mlp_c_fc_w[current_layer]
+                    # state['ff1'] = np.dot(state['ln2'], w) + b[None, None, :]
+                    if self.use_cuda:
+                        w = self.mlp_c_fc_w[current_layer]
+                        b = self.mlp_c_fc_b[current_layer]
+                        s['ff1'] = torch.matmul(s['ln2'], w) + b[None, None, :]
+                    else:
+                        w = self.mlp_c_fc_w[current_layer]
+                        b = self.mlp_c_fc_b[current_layer]
+                        s['ff1'] = np.dot(s['ln2'], w) + b[None, None, :]
+                    response_state['ff1'] = s['ff1']
+                    i += 1
 
-            elif local_i == 12:
-                # state['output'] = state['attn_residual'] + state['ff2']
-                if self.use_cuda:
-                    s['output'] = s['attn_residual'] + s['ff2']
-                else:
-                    s['output'] = s['attn_residual'] + s['ff2']
-                i += 1
+                elif local_i == 11:
+                    if self.use_cuda:
+                        w = self.mlp_c_proj_w[current_layer]
+                        b = self.mlp_c_proj_b[current_layer]
+                        s['ff2'] = torch.matmul(s['gelu'], w) + b[None, None, :]
+                    else:
+                        w = self.mlp_c_proj_w[current_layer]
+                        b = self.mlp_c_proj_b[current_layer]
+                        s['ff2'] = np.dot(s['gelu'], w) + b[None, None, :]
+                    response_state['ff2'] = s['ff2'] 
+                    i += 1
 
-            else:
-                break
+
+                else:
+                    break
             end = time.time()  # 每个操作后测量（除 final 外）
-            if 'start' in locals():
-                time_ms = (end - start) * 1000
-                local_storage.all_times[i - 1] = ('server', time_ms)  # 归属到刚完成的 i（增前）
+            #if 'start' in locals():
+                #time_ms = (end - start) * 1000
+                #local_storage.all_times[i - 1] = ('server', time_ms)  # 归属到刚完成的 i（增前）
 
         # 在返回之前，把 state（可能含 torch tensors）转为 numpy
-        out_state_np = self._to_numpy_state(s)
+        #out_state_np = self._to_numpy_state(s)
+        out_state_np = self._to_numpy_state(response_state)
         
         if i == 9999:
             #print("\n服务端本次输入执行时间统计:")
