@@ -98,7 +98,7 @@ class TransformerClient:
             return 1202, state
 
         while True:
-            print(f"i:{i}   state:{list(state.keys())}")
+            #print(f"i:{i}   state:{list(state.keys())}")
             if local_i == 1:  # LN1
                 gamma = params['ln1_gamma']
                 beta = params['ln1_beta']
@@ -192,7 +192,10 @@ def perform_inference(client, stub, input_text, collect_times=True):
                 keys_to_send = []
                 local_i = i % 100
                 
-                if local_i == 2: 
+                if i == 1202:
+                    # Final LN 已处理完毕，准备发送 ln_final 给 Server 计算 logits
+                    keys_to_send = ['ln_final']
+                elif local_i == 2: 
                     # Server 要算 QKV+Scores。只需要 ln1。
                     # input 留本地做残差，不发！
                     keys_to_send = ['ln1']
@@ -211,8 +214,6 @@ def perform_inference(client, stub, input_text, collect_times=True):
                 
                 # 构造精简的 request
                 req_state = filter_state(state, keys_to_send)
-                print(f"key to send {local_i}: {keys_to_send}")
-                print(f"req_state {local_i}: {req_state}")
                 req = demo_pb2.TransformerRequest(op_id=i, state=demo_pb2.State(items=req_state))
                 
                 end = time.time() if collect_times else None
@@ -231,6 +232,8 @@ def perform_inference(client, stub, input_text, collect_times=True):
                 received_state = state_to_np(resp.state)
                 state.update(received_state)
                 
+                #print(f"resp {i} : {state_to_np(resp.state).keys()}")
+
                 # 内存清理：发送过的数据如果在后续步骤不再需要，可以清理
                 # 注意：V 需要保留到 Step 4，但 Step 1 发送 ln1 后 ln1 可以删了
                 if 'ln1' in state and local_i > 1: del state['ln1']
@@ -244,7 +247,7 @@ def perform_inference(client, stub, input_text, collect_times=True):
             gc.collect()
 
     # Send Final Request to Server (Compute Logits)
-    #req = demo_pb2.TransformerRequest(op_id=i, state=demo_pb2.State(items=np_to_state(state)))
+    state['ln_final'] = state['input']
     req = demo_pb2.TransformerRequest(op_id=1202, state=demo_pb2.State(items=filter_state(state, ['ln_final'])))
     start = time.time() if collect_times else None
     resp = stub.Process(req)
