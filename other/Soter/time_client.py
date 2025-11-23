@@ -449,7 +449,7 @@ def perform_inference(client, stub, input_text, profiler=None):
 
     return next_token_id
 
-def run():
+def run(input_len=5, run_times=1):
     parser = argparse.ArgumentParser(description="Transformer gRPC Client")
     parser.add_argument('--host', type=str, default='localhost:50051', help='Server host and port')
     args = parser.parse_args()
@@ -471,16 +471,18 @@ def run():
     _ = perform_inference(client, stub, "Warmup", profiler=None)
     print("--- Warmup Finished ---")
     
-    input_text = "The capital of France is"
-    
-    # 开启 Profiler
-    my_profiler = Profiler()
-    next_token_id = perform_inference(client, stub, input_text, profiler=my_profiler)
-    
-    print(f"\nNext token: '{client.tokenizer.decode(next_token_id)}'")
-    
-    # 打印详细报告和总计汇总
-    my_profiler.print_report()
+    for run_idx in range(run_times):
+        input_text = "The capital of France is"
+        
+        # 开启 Profiler
+        my_profiler = Profiler()
+        next_token_id = perform_inference(client, stub, input_text, profiler=my_profiler)
+        
+        print(f"\nNext token: '{client.tokenizer.decode(next_token_id)}'")
+        
+        # 打印详细报告和总计汇总
+        print(f"\nRun {run_idx + 1} Next token: '{client.tokenizer.decode(next_token_id)}'")
+        my_profiler.print_report()
 
 if __name__ == '__main__':
-    run()
+    run(run_times=5)
