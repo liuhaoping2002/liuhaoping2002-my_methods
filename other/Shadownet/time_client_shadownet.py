@@ -54,18 +54,30 @@ def gelu(x):
     import math
     return x * 0.5 * (1.0 + np.tanh(math.sqrt(2.0 / math.pi) * (x + 0.044715 * np.power(x, 3))))
 
-# --- 新增：安全缩放工具 ---
-SCALING_FACTOR = 1.88  # 缩放因子，可以是任意值，模拟混淆
+#SCALING_FACTOR = 1.88  # 缩放因子，可以是任意值，模拟混淆
 
-def scale_state(state_np, mode='encrypt'):
+def scale_state(state_np, mask_ratio=0.2):
     """
     mode='encrypt': 数据 * 因子 (离开安全区域或计算完成后)
     mode='decrypt': 数据 / 因子 (进入区域或计算开始前)
     """
-    factor = SCALING_FACTOR if mode == 'encrypt' else (1.0 / SCALING_FACTOR)
     new_state = {} 
     for i in state_np:
-        new_state[i] =  state_np[i] * factor
+        if "_w" in i:  
+            r, c = state_np[i].shape
+            mask_c = int(c * mask_ratio)
+            rng = np.random.default_rng(seed=42)
+            m = rng.normal(size=(r, mask_c))
+            n = np.empty_like(state_np[i])
+            idx = rng.integers(low=0, high=mask_c, size=c)
+            for j in range(c):
+                n[:, j] = m[:, idx[j]]
+            new_state[i] = state_np[i] + n
+            new_state['n'] = n
+        else:
+            new_state[i] = state_np[i]
+    #print(type(state_np), type(new_state))
+    #print("newstate\n", new_state, "\nstatenp\n", state_np)
     return np_to_state(new_state)
 
 # --- 统计工具类 (修改了 print_report 逻辑，加入了最终汇总) ---
@@ -389,16 +401,16 @@ def perform_inference(client, stub, input_text, profiler=None):
                     keys_to_send = []
                     local_i = i % 100
                     
-                    if local_i == 2: keys_to_send = ['ln1', 'c_attn_w', 'c_attn_b']
-                    elif local_i == 6: keys_to_send = ['aout', 'c_proj_b', 'c_proj_w']
-                    elif local_i == 9: keys_to_send = ['ln2', 'mlp_c_fc_w', 'mlp_c_fc_b']
-                    elif local_i == 11: keys_to_send = ['gelu', 'mlp_c_proj_w', 'mlp_c_proj_b']
+                    if local_i == 2: keys_to_send = ['ln1', 'c_attn_w', 'c_attn_b', 'n']
+                    elif local_i == 6: keys_to_send = ['aout', 'c_proj_b', 'c_proj_w', 'n']
+                    elif local_i == 9: keys_to_send = ['ln2', 'mlp_c_fc_w', 'mlp_c_fc_b', 'n']
+                    elif local_i == 11: keys_to_send = ['gelu', 'mlp_c_proj_w', 'mlp_c_proj_b', 'n']
                     
                     req_state = filter_state(state, keys_to_send)
 
                     req_state_np = state_to_np(demo_pb2.State(items=req_state))
                     t_scale_start = time.perf_counter()
-                    encrypted_state = scale_state(req_state_np, 'encrypt')
+                    encrypted_state = scale_state(req_state_np)
                     t_scale_end = time.perf_counter()
                     if profiler: profiler.log_scaling(layer, t_scale_end - t_scale_start)
 
@@ -418,7 +430,7 @@ def perform_inference(client, stub, input_text, profiler=None):
                     received_state = state_to_np(resp.state)
 
                     t_scale_start = time.perf_counter()
-                    decrypted_state = scale_state(received_state, 'decrypt')
+                    decrypted_state = scale_state(received_state)
                     t_scale_end = time.perf_counter()
                     if profiler: profiler.log_scaling(layer, t_scale_end - t_scale_start)
 
@@ -500,4 +512,4 @@ def run(input_len=5, run_times=1):
         my_profiler.print_report()
 
 if __name__ == '__main__':
-    run(run_times=2)
+    run(run_times=5)

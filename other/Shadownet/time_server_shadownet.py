@@ -198,12 +198,15 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
                 if local_i == 2:  # QKV
                     # [计时] QKV Matmul
                     t0 = time.perf_counter()
+                    n = s['n']
+                    print(f"shape of ln1: {s['ln1'].shape} shape of n: {n.shape} shape of c_attn_w: {s['c_attn_w'].shape} ")
                     if self.use_cuda:
                         inp = s['ln1']
                         #w, b = self.c_attn_w[current_layer], self.c_attn_b[current_layer]
                         w = s['c_attn_w']
                         b = s['c_attn_b']
                         proj = torch.matmul(inp, w) + b[None, None, :]
+                        proj_n = torch.matmul(inp, n) + b[None, None, :]
                         self._sync()
                     else:
                         inp = s['ln1']
@@ -211,6 +214,7 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
                         w = s['c_attn_w']
                         b = s['c_attn_b']
                         proj = np.dot(inp, w) + b[None, None, :]
+                        proj_n = np.dot(inp, n) + b[None, None, :]
                     t1 = time.perf_counter()
                     pure_compute_time += (t1 - t0)
 
@@ -242,6 +246,7 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
                     t0 = time.perf_counter()
                     w = s['c_proj_w']
                     b = s['c_proj_b']
+                    n = s['n']
                     if self.use_cuda:
                         B, H, S_q, d_v = s['aout'].shape
                         aout = s['aout'].permute(0, 2, 1, 3).reshape(B, S_q, self.d_model)
@@ -264,13 +269,16 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
                     t0 = time.perf_counter()
                     w = s['mlp_c_fc_w']
                     b = s['mlp_c_fc_b']
+                    n = s['n']
                     if self.use_cuda:
                         #w, b = self.mlp_c_fc_w[current_layer], self.mlp_c_fc_b[current_layer]
                         s['ff1'] = torch.matmul(s['ln2'], w) + b[None, None, :]
+                        sff1n = torch.matmul(s['ln2'], n) + b[None, None, :]
                         self._sync()
                     else:
                         #w, b = self.mlp_c_fc_w[current_layer], self.mlp_c_fc_b[current_layer]
                         s['ff1'] = np.dot(s['ln2'], w) + b[None, None, :]
+                        sff1n = np.dot(s['ln2'], n) + b[None, None, :]
                     t1 = time.perf_counter()
                     pure_compute_time += (t1 - t0)
 
@@ -282,13 +290,16 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
                     t0 = time.perf_counter()
                     w = s['mlp_c_proj_w']
                     b = s['mlp_c_proj_b']
+                    n = s['n']
                     if self.use_cuda:
                         #w, b = self.mlp_c_proj_w[current_layer], self.mlp_c_proj_b[current_layer]
                         s['ff2'] = torch.matmul(s['gelu'], w) + b[None, None, :]
+                        sff2n = torch.matmul(s['gelu'], n) + b[None, None, :]
                         self._sync()
                     else:
                         #w, b = self.mlp_c_proj_w[current_layer], self.mlp_c_proj_b[current_layer]
                         s['ff2'] = np.dot(s['gelu'], w) + b[None, None, :]
+                        sff2n = np.dot(s['gelu'], n) + b[None, None, :]
                     t1 = time.perf_counter()
                     pure_compute_time += (t1 - t0)
 
