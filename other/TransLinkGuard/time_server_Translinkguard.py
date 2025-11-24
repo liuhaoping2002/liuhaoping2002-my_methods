@@ -39,7 +39,7 @@ def np_to_state(state_np):
 def layer_norm(x, weight, bias, eps=1e-5):
     mean = x.mean(axis=-1, keepdims=True)
     var = ((x - mean) ** 2).mean(axis=-1, keepdims=True)
-    std = np.sqrt(var + eps)
+    std = torch.sqrt(var + eps)
     norm = (x - mean) / std
     return norm * weight + bias
 

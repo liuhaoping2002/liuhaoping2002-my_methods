@@ -56,20 +56,77 @@ def gelu(x):
 
 #SCALING_FACTOR = 1.88  # 缩放因子，可以是任意值，模拟混淆
 
-def deobf_state_double(state_np, mask_ratio=0.2):
-
+def deobf_state_double(X, Y, state_np):
     new_state = {} 
+    Yt = np.transpose(Y, (0,1,3,2))
+    batch, H, S, Ddim = X.shape
+    D1 = np.random.rand(1, H, S)
+    D2 = np.random.rand(1, H, S)
+    O = np.random.rand(1, H, S, 1)
+    v = np.random.rand(1, H, 1, Ddim)
+    DO = D1[..., None] * O
+
+    print(f"x shape: {X.shape}, Yt shape: {Y.shape}")
+    
+
+    # (D O) @ (v Y^T) → (1,H,S,S)
+    # 右乘 B
+    confusion = np.matmul(DO, np.matmul(v, Yt)) * D2[:, :, :, None]
+
+    # ===== 最终注意力矩阵 ======
+    #return attn + confusion
+    
+    #print("D1.shape ",D1.shape, "D2.shape ",D2.shape, "v.shape ",v.shape, "one.shape ",one.shape)
     for i in state_np:
-        new_state[i] = state_np[i]
-    #print(type(state_np), type(new_state))
-    #print("newstate\n", new_state, "\nstatenp\n", state_np)
+        new_state[i] = state_np[i] + confusion
+        #print("x_reshape.shape ",x_reshape.shape, "y_reshape.shape ",y_reshape.shape, "state ", state_np[i].shape)
+
+    return np_to_state(new_state)
+
+def deobf_state_double12(attn, V, state_np):
+    new_state = {}
+    for i in state_np:
+        Y = state_np[i]
+        batch, H, S, Ddim = Y.shape
+
+        D1 = np.random.rand(1, H, S)
+        O  = np.random.rand(1, H, S, 1)
+        v  = np.random.rand(1, H, 1, Ddim)
+
+        # DO  : (1,H,S,1)
+        DO = D1[..., None] * O
+
+        # vY  : (1,H,1,D) @ (1,H,S,D) → (1,H,1,D)
+        # 但我们需要 (1,H,1,D)，所以按元素相乘并沿 S 方向求和：
+        vY = np.sum(v * Y, axis=2, keepdims=True)   # (1,H,1,D)
+
+        # final confusion: (1,H,S,1) @ (1,H,1,D) → (1,H,S,D)
+        confusion = DO * vY
+        new_state[i] = Y + confusion
+        # ===== 3. 加到 attn@V =====
     return np_to_state(new_state)
 
 def deobf_state_single(x, state_np):
     new_state = {} 
     for i in state_np:
-        #v = np.random.rand(1,state_np[i].shape)
-        print(f"shape of x: {x.shape}, state_np[{i}]: {state_np[i].shape}")
+        if state_np[i].ndim == 4:
+            s_reshape = state_np[i].reshape(1, state_np[i].shape[2], -1)
+        else:
+            s_reshape = state_np[i]
+        if x.ndim ==4:
+            x_reshape = x.reshape(1, x.shape[2], -1)
+        else:
+            x_reshape = x
+        D = np.random.rand(s_reshape.shape[-1])
+        v = np.random.rand(x_reshape.shape[-1], 1)
+        one = np.ones((1,s_reshape.shape[-1]))
+        perm = np.random.permutation(s_reshape.shape[-1])
+        res =(s_reshape*D)[:, :, perm]-x_reshape@v@one*D
+        if state_np[i].ndim ==4:
+            new_state[i] = res.reshape(1, state_np[i].shape[1], state_np[i].shape[2], state_np[i].shape[3])
+        else:
+            new_state[i] = res
+        
     return np_to_state(new_state)
 
 def obf_state_double(state_np, D):
@@ -459,8 +516,11 @@ def perform_inference(client, stub, input_text, profiler=None):
                     print(f"Layer {layer} Op {i}: Deobfuscating received state for keys {list(received_state.keys())}.")
                     if i%100 in [2, 6, 9, 11]:
                         decrypted_state = deobf_state_single(state[past_op_id[i%100]], received_state)
-                    elif i%100 in [3, 5]:
-                        decrypted_state = deobf_state_double(received_state)
+                    elif i%100 ==3 :
+                        decrypted_state = deobf_state_double(state['K'],state['Q'], received_state)
+                    elif i%100 ==5 :
+                        print(list(state.keys()))
+                        decrypted_state = deobf_state_double12(state['attn'],state['V'],received_state)
                     t_scale_end = time.perf_counter()
                     if profiler: profiler.log_scaling(layer, t_scale_end - t_scale_start)
 
