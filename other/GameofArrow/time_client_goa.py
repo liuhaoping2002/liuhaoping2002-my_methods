@@ -545,7 +545,7 @@ def perform_inference(client, stub, input_text, profiler=None):
     t_start = time.perf_counter()
     resp = stub.Process(req)
     t_end = time.perf_counter()
-    if profiler: profiler.final_logits_time = t_end - t_start # seconds
+    if profiler: profiler.final_logits_rpc_time = t_end - t_start # seconds
         
     state = state_to_np(resp.state)
     logits = state['logits']
@@ -561,30 +561,42 @@ def perform_inference(client, stub, input_text, profiler=None):
 
     return next_token_id
 
-def run(input_len=5, run_times=1):
-    parser = argparse.ArgumentParser(description="Transformer gRPC Client")
-    parser.add_argument('--host', type=str, default='localhost:50051', help='Server host and port')
-    args = parser.parse_args()
+import random
+
+def make_random_token_string(seq_len: int) -> str:
+    # 简单的 token（词）列表，可再扩充
+    vocab = [
+        "the", "of", "and", "to", "a", "in", "that", "is", "for", "on",
+        "with", "as", "this", "by", "are", "was", "from", "at", "it", "an",
+        "model", "data", "token", "value", "input", "output", "layer",
+        "random", "matrix", "state", "hidden", "sequence", "test",
+        "generate", "sample", "embedding", "decode", "encode", "compute"
+    ]
     
+    return " ".join(random.choice(vocab) for _ in range(seq_len))
+
+def run(input_len=5, run_times=1):
+    host = 'localhost:50051'
     NNN = 10485760 * 4
     options = [
         ('grpc.max_send_message_length', NNN),
         ('grpc.max_receive_message_length', NNN)
     ]
-    channel = grpc.insecure_channel(args.host, options=options)
+    channel = grpc.insecure_channel(host, options=options)
     stub = demo_pb2_grpc.TransformerServiceStub(channel)
     
     client = TransformerClient()
     
-    print(f"Connecting to {args.host}. Running with SGX Memory Optimization (Lazy Loading)...")
+    print(f"Connecting to {host}. Running with SGX Memory Optimization (Lazy Loading)...")
     
     # Warmup - 不开启 Profiler
     print("--- Starting Warmup ---")
     _ = perform_inference(client, stub, "Warmup", profiler=None)
     print("--- Warmup Finished ---")
     
+    input_text = make_random_token_string(input_len)
     for run_idx in range(run_times):
-        input_text = "The capital of France is"
+        #input_text = "The capital of France is"
         
         # 开启 Profiler
         my_profiler = Profiler()
@@ -596,5 +608,12 @@ def run(input_len=5, run_times=1):
         print(f"\nRun {run_idx + 1} Next token: '{client.tokenizer.decode(next_token_id)}'")
         my_profiler.print_report()
 
+
 if __name__ == '__main__':
-    run(run_times=5)
+    parser = argparse.ArgumentParser(description="Transformer gRPC Client")
+    parser.add_argument('--run-times', type=int, default=5,
+                        help='Number of inference iterations')
+    parser.add_argument('--input-len', type=int, default=10,
+                        help='Approximate input text length (words)')
+    args = parser.parse_args()
+    run(run_times=args.run_times, input_len=args.input_len)
