@@ -36,10 +36,14 @@ def state_to_np(state_pb):
 def np_to_state(state_np):
     return {k: np_to_tensor(v) for k, v in state_np.items()}
 
-def layer_norm(x, weight, bias, eps=1e-5):
+def layer_norm(x, weight, bias, dev, eps=1e-5):
     mean = x.mean(axis=-1, keepdims=True)
     var = ((x - mean) ** 2).mean(axis=-1, keepdims=True)
-    std = torch.sqrt(var + eps)
+    if dev == 'cuda':
+        std = torch.sqrt(var + eps)
+    else:
+        std = np.sqrt(var + eps)
+    #std = torch.sqrt(var + eps)
     norm = (x - mean) / std
     return norm * weight + bias
 
@@ -200,7 +204,7 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
 
             while True:
                 local_i = i % 100
-                print(f"Processing op_id: {i} {list(s.keys())}")
+                #print(f"Processing op_id: {i} {list(s.keys())}")
                 
                 if i >= 1202: # Logits
                     # [计时] Logits Matmul
@@ -316,7 +320,7 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
 
                 #elif local_i == 8: # LayerNorm 2
                     t0 = time.perf_counter()
-                    s['ln2'] = layer_norm(s['attn_residual'], self.ln2_gamma[current_layer], self.ln2_beta[current_layer])
+                    s['ln2'] = layer_norm(s['attn_residual'], self.ln2_gamma[current_layer], self.ln2_beta[current_layer], self.device)
                     #response_state['attn_residual'] = s['attn_residual']
                     t1 = time.perf_counter()
                     pure_compute_time += (t1 - t0)

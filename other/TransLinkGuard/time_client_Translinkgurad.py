@@ -303,7 +303,7 @@ def perform_inference(client, stub, input_text, profiler=None):
         try:
             while True:
                 old_i = i
-                print(f"Client Layer {layer} Op {i}: {list(state.keys())}")
+                #print(f"Client Layer {layer} Op {i}: {list(state.keys())}")
                 
                 # [统计] Client 本地计算 (TEE)
                 t_start = time.perf_counter()
