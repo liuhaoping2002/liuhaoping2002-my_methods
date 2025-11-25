@@ -36,6 +36,36 @@ def np_to_state(state_np):
 def state_to_np(state_pb):
     return {k: tensor_to_np(v) for k, v in state_pb.items.items()}
 
+def sample_A_constructive(d, a=1.0, rng=None):
+    if rng is None:
+        rng = np.random.default_rng()
+    one = np.ones((d,1))
+    u0 = one / np.sqrt(d)      # 均值方向 unit vector (d,1)
+    # --- 构造 U_s：d x (d-1) 矩阵，列为与 u0 正交的正交基 ---
+    R = rng.normal(size=(d, d-1))
+    R = R - u0 @ (u0.T @ R)    # 把列投影到与 u0 正交
+    # QR 得到正交基（d x d, 取前 d-1 列）
+    Q_full, _ = np.linalg.qr(R, mode='reduced')  # returns d x (d-1)
+    Us = Q_full[:, :d-1]  # d x (d-1), orthonormal columns spanning S
+    # --- 在 (d-1)-维上采样 Haar 正交矩阵 Q_small ---
+    G = rng.normal(size=(d-1, d-1))
+    Qs, Rg = np.linalg.qr(G)
+    # 调整符号，使得分布是 Haar (对角符号修正)
+    D = np.sign(np.diag(Rg))
+    D[D==0] = 1.0
+    Q_small = Qs * D
+    # --- embed Q_small into original space: Q = Us @ Q_small @ Us.T ---
+    Q = Us @ (Q_small @ Us.T)
+    # 投影 J, P
+    J = (one @ one.T) / d
+    P = np.eye(d) - J
+    # A
+    A = a * J + Q   # note QJ = 0, QP = Q, so this equals aJ + QP
+    return {
+        "A": A, "J": J, "P": P, "Us": Us, "Q_small": Q_small, "Q": Q, "a": a
+    }
+
+
 class TransformerClient:
     def __init__(self):
         # 加载参数（只剩 embedding 相关）
@@ -72,6 +102,15 @@ def perform_inference(client, stub, input_text, collect_times=True):
     if collect_times:
         all_times['embedding'] = (end_time-start_time)*1000
     
+    A = sample_A_constructive(client.hidden_size, a=1.8)['A']
+    print(f"shape of hidden: {hidden.shape} A: {A.shape}")
+    start_time = time.time() if collect_times else None
+    A_obf = hidden@A
+    A_deobf = A_obf@A
+    end_time = time.time() if collect_times else None
+    if collect_times:
+        all_times['obf'] = (end_time - start_time) * 1000
+    
     # 唯一一次通信: 发送 input 到 REE 执行所有 blocks + final LN + logits
     if collect_times:
         req = demo_pb2.TransformerRequest(op_id=1000, state=demo_pb2.State(items=np_to_state(state)))
@@ -106,6 +145,7 @@ def perform_inference(client, stub, input_text, collect_times=True):
         print("-" * 30)
         print(f"{'embedding':<20}{all_times['embedding']:<10.2f}")
         print(f"{'decode':<20}{all_times['decode']:<10.2f}")
+        print(f"{'obf':<20}{all_times['obf']:<10.2f}")
         print(f"{'Total Compute':<20}{total_compute:<10.2f}")
         print(f"{'gRPC Call':<20}{grpc_time:<10.2f}")
 
