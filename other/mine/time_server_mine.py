@@ -183,95 +183,162 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
             return sp_softmax(x, axis=axis)
 
     def full_forward_all(self, input_hidden, whether_warmup=False):
+        """
+        返回：
+        x: 最终输出
+        layer_time: dict, 每层的“纯计算”耗时（毫秒）
+        计时策略：只记录主要数值计算（matmul/dot, softmax, gelu, layer_norm 等）。
+        不记录：reshape/transpose/permute/astype/随机数或mask的生成等开销。
+        """
         layer_time = {}
+        # 将输入转换为内部状态（保持原逻辑）
         s = self._to_torch_state({'input': input_hidden})
         x = s['input']
 
-        for layer in range(self.n_layer):
-            st = time.time()
-            # LN1
-            ln1 = self.layer_norm(x, self.ln1_gamma[layer], self.ln1_beta[layer])
+        # 用于高精度计时
+        perf = time.perf_counter
 
-            # QKV
+        for layer in range(self.n_layer):
+            compute_time = 0.0  # 本层只计数“纯计算”，单位秒
+
+            # ========== LN1 ==========
+            # layer_norm 被视为模型计算的一部分 => 计时
+            t0 = perf()
+            ln1 = self.layer_norm(x, self.ln1_gamma[layer], self.ln1_beta[layer])
+            t1 = perf(); compute_time += (t1 - t0)
+
+            # ========== QKV projection ==========
+            # proj 的矩阵乘/加被计时；reshape/transposes 放在计时外
             if self.use_cuda:
+                t0 = perf()
                 proj = torch.matmul(ln1, self.c_attn_w[layer]) + self.c_attn_b[layer][None, None, :]
+                t1 = perf(); compute_time += (t1 - t0)
+
+                # 下面的 reshape / permute 不计时（只做形状调整）
                 B, S, _ = ln1.shape
                 Q = proj[:, :, :self.d_model].reshape(B, S, self.h, self.d_k).permute(0, 2, 1, 3)
                 K = proj[:, :, self.d_model:2*self.d_model].reshape(B, S, self.h, self.d_k).permute(0, 2, 1, 3)
                 V = proj[:, :, 2*self.d_model:].reshape(B, S, self.h, self.d_k).permute(0, 2, 1, 3)
             else:
+                t0 = perf()
                 proj = np.dot(ln1, self.c_attn_w[layer]) + self.c_attn_b[layer][None, None, :]
+                t1 = perf(); compute_time += (t1 - t0)
+
                 B, S, _ = ln1.shape
+                # reshape/transpose 不计时
                 Q = proj[:, :, :self.d_model].reshape(B, S, self.h, self.d_k).transpose(0, 2, 1, 3)
                 K = proj[:, :, self.d_model:2*self.d_model].reshape(B, S, self.h, self.d_k).transpose(0, 2, 1, 3)
                 V = proj[:, :, 2*self.d_model:].reshape(B, S, self.h, self.d_k).transpose(0, 2, 1, 3)
 
-            # scores + mask
+            # ========== scores = Q @ K^T / sqrt(d_k) 以及 mask add ==========
+            # 计算 scores 的矩阵乘是重要计算 -> 计时
             if self.use_cuda:
+                t0 = perf()
                 scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
+                t1 = perf(); compute_time += (t1 - t0)
+
+                # mask 的生成（形状操作）不计时，但 mask 加到 scores 是数值计算，应计时
                 S_q = Q.shape[2]
+                # 注意：为了避免在计时中包含 mask 的生成开销，先生成 mask（不计时）
                 mask = torch.triu(torch.ones((S_q, S_q), device=self.device) * -1e9, diagonal=1)
+                # 把 mask 加到 scores 视为数值计算，计时
+                t0 = perf()
                 scores = scores + mask[None, None, :, :]
+                t1 = perf(); compute_time += (t1 - t0)
             else:
+                t0 = perf()
+                # 注意：K.transpose(0,1,3,2) 是 shape 操作，K already prepared; matmul 计时
                 scores = np.matmul(Q, K.transpose(0, 1, 3, 2)) / np.sqrt(self.d_k)
+                t1 = perf(); compute_time += (t1 - t0)
+
                 S_q = Q.shape[2]
-                mask = np.triu(np.ones((S_q, S_q)) * -1e9, k=1)
-                scores += mask[None, None, :, :]
+                mask = np.triu(np.ones((S_q, S_q)) * -1e9, k=1)  # 生成 mask 不计时
+                t0 = perf()
+                scores = scores + mask[None, None, :, :]
+                t1 = perf(); compute_time += (t1 - t0)
 
-            # softmax
+            # ========== softmax ==========
+            t0 = perf()
             attn = self.softmax(scores, axis=-1)
+            t1 = perf(); compute_time += (t1 - t0)
 
-            # attn @ V
+            # ========== attn @ V ==========
+            t0 = perf()
             if self.use_cuda:
                 aout = torch.matmul(attn, V)
             else:
                 aout = np.matmul(attn, V)
+            t1 = perf(); compute_time += (t1 - t0)
 
-            # c_proj
+            # ========== c_proj: aout -> attn_out (matmul + bias) ==========
+            # reshape / permute 视为形状操作，不计时
             if self.use_cuda:
                 B, H, S_q, d_v = aout.shape
                 aout = aout.permute(0, 2, 1, 3).reshape(B, S_q, self.d_model)
+                t0 = perf()
                 attn_out = torch.matmul(aout, self.c_proj_w[layer]) + self.c_proj_b[layer][None, None, :]
+                t1 = perf(); compute_time += (t1 - t0)
             else:
                 B, H, S_q, d_v = aout.shape
                 aout = aout.transpose(0, 2, 1, 3).reshape(B, S_q, self.d_model)
+                t0 = perf()
                 attn_out = np.dot(aout, self.c_proj_w[layer]) + self.c_proj_b[layer][None, None, :]
+                t1 = perf(); compute_time += (t1 - t0)
 
-            # residual after attn
-            attn_residual = x + attn_out 
+            # ========== residual after attn ==========
+            # 这里 x + attn_out 是一次简单加法（数值计算），我们也计时它
+            t0 = perf()
+            attn_residual = x + attn_out
+            t1 = perf(); compute_time += (t1 - t0)
+
+            # ========== 随机矩阵相关（rand1的生成不计时，但矩阵乘计时） ==========
+            # 生成 rand1（随机生成视为非计时开销）
             if self.use_cuda:
-                rand1 = torch.rand(self.d_model, self.d_model)
+                rand1 = torch.rand(self.d_model, self.d_model, device=self.device)
+                t0 = perf()
                 ir1 = torch.matmul(attn_residual, rand1)
                 ir2 = torch.matmul(ir1, rand1)
+                t1 = perf(); compute_time += (t1 - t0)
             else:
                 rand1 = np.random.rand(self.d_model, self.d_model)
+                t0 = perf()
                 ir1 = np.dot(attn_residual, rand1)
                 ir2 = np.dot(ir1, rand1)
+                t1 = perf(); compute_time += (t1 - t0)
 
-            # LN2
+            # ========== LN2 ==========
+            t0 = perf()
             ln2 = self.layer_norm(attn_residual, self.ln2_gamma[layer], self.ln2_beta[layer])
+            t1 = perf(); compute_time += (t1 - t0)
 
-            # FF1
+            # ========== FF1 ==========
+            t0 = perf()
             if self.use_cuda:
                 ff1 = torch.matmul(ln2, self.mlp_c_fc_w[layer]) + self.mlp_c_fc_b[layer][None, None, :]
             else:
                 ff1 = np.dot(ln2, self.mlp_c_fc_w[layer]) + self.mlp_c_fc_b[layer][None, None, :]
+            t1 = perf(); compute_time += (t1 - t0)
 
-            # GELU
+            # ========== GELU ==========
+            t0 = perf()
             gelu = self.gelu(ff1)
+            t1 = perf(); compute_time += (t1 - t0)
 
-            # FF2
+            # ========== FF2 ==========
+            t0 = perf()
             if self.use_cuda:
                 ff2 = torch.matmul(gelu, self.mlp_c_proj_w[layer]) + self.mlp_c_proj_b[layer][None, None, :]
             else:
                 ff2 = np.dot(gelu, self.mlp_c_proj_w[layer]) + self.mlp_c_proj_b[layer][None, None, :]
+            t1 = perf(); compute_time += (t1 - t0)
 
-            # final residual
+            # ========== final residual (数值相加，计时) ==========
+            t0 = perf()
             x = attn_residual + ff2
-            ed = time.time()
-            layer_time[f"layer {layer}"] = (ed - st) * 1000
-            #if whether_warmup == False:
-            #    print(f"layer {layer} ouput:\n", x)
+            t1 = perf(); compute_time += (t1 - t0)
+
+            # 存储本层的纯计算耗时（毫秒）
+            layer_time[f"layer {layer}"] = compute_time * 1000.0
 
         st = time.time()
         ln_final = self.layer_norm(x, self.final_gamma, self.final_beta)
