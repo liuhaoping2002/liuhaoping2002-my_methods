@@ -238,6 +238,7 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
                         S_q = Q.shape[2]
                         mask = torch.triu(torch.ones((S_q, S_q), device=self.device) * -1e9, diagonal=1)
                         s['scores'] = s['scores'] + mask[None, None, :, :]
+                        self._sync()
                     else:
                         s['scores'] = np.matmul(Q, K.transpose(0, 1, 3, 2)) / np.sqrt(self.d_k)
                         S_q = Q.shape[2]
@@ -252,6 +253,7 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
                     attn = s['attn']
                     if self.use_cuda:
                         s['aout'] = torch.matmul(attn, V)
+                        self._sync()
                     else:
                         s['aout'] = np.matmul(attn, V)
                     response_state['aout'] = s['aout']
