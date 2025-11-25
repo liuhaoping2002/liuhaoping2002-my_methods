@@ -151,32 +151,52 @@ def perform_inference(client, stub, input_text, collect_times=True):
 
     return logits, next_token_id
 
-def run(run_times = 5):
-    time_count = time.time()
+import argparse
+import random
+
+def make_random_token_string(seq_len: int) -> str:
+    # 简单的 token（词）列表，可再扩充
+    vocab = [
+        "the", "of", "and", "to", "a", "in", "that", "is", "for", "on",
+        "with", "as", "this", "by", "are", "was", "from", "at", "it", "an",
+        "model", "data", "token", "value", "input", "output", "layer",
+        "random", "matrix", "state", "hidden", "sequence", "test",
+        "generate", "sample", "embedding", "decode", "encode", "compute"
+    ]
+    
+    return " ".join(random.choice(vocab) for _ in range(seq_len))
+
+def run(input_len=5, run_times=1):
+    host = 'localhost:50052'
     NNN = 10485760 * 4
     options = [
         ('grpc.max_send_message_length', NNN),
         ('grpc.max_receive_message_length', NNN)
     ]
-    channel = grpc.insecure_channel('localhost:50052', options=options)
+    channel = grpc.insecure_channel(host, options=options)
     stub = demo_pb2_grpc.TransformerServiceStub(channel)
     
-    time_count = time_cost("channel establish", time_count)
     client = TransformerClient()
     
-    # Warmup
-    warmup_runs = 1
-    print(f"Performing {warmup_runs} warmup runs...")
-    for _ in range(warmup_runs):
-        _, _ = perform_inference(client, stub, "Warmup input", collect_times=False)
-    print("Warmup completed.")
+    print(f"Connecting to {host}. Running with SGX Memory Optimization (Lazy Loading)...")
     
-    # 实际运行
-    for i in range(run_times):
-        print(f"\nRun {i+1}/{run_times}:")
-        input_text = "The capital of France is"
-        time_count = time_cost("Tokenizer", time_count)
+    # Warmup - 不开启 Profiler
+    print("--- Starting Warmup ---")
+    _, _ = perform_inference(client, stub, "Warmup input", collect_times=False)
+    print("--- Warmup Finished ---")
+    
+    input_text = make_random_token_string(input_len)
+    for run_idx in range(run_times):
+        #input_text = "The capital of France is"
         _, next_token_id = perform_inference(client, stub, input_text, collect_times=True)
+        
+
 
 if __name__ == '__main__':
-    run(run_times=1)
+    parser = argparse.ArgumentParser(description="Transformer gRPC Client")
+    parser.add_argument('--run-times', type=int, default=5,
+                        help='Number of inference iterations')
+    parser.add_argument('--input-len', type=int, default=10,
+                        help='Approximate input text length (words)')
+    args = parser.parse_args()
+    run(run_times=args.run_times, input_len=args.input_len)
