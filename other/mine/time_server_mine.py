@@ -79,6 +79,7 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
         self.d_model = data['c_attn_w'].shape[-1] // 3
         self.h = 12
         self.d_k = self.d_model // self.h
+        self.seq_len = 0
 
         # 线性层参数
         c_attn_w_np = [data['c_attn_w'][i] for i in range(self.n_layer)]
@@ -237,7 +238,15 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
                 attn_out = np.dot(aout, self.c_proj_w[layer]) + self.c_proj_b[layer][None, None, :]
 
             # residual after attn
-            attn_residual = x + attn_out
+            attn_residual = x + attn_out 
+            if self.use_cuda:
+                rand1 = torch.rand(self.d_model, self.d_model)
+                ir1 = torch.matmul(attn_residual, rand1)
+                ir2 = torch.matmul(ir1, rand1)
+            else:
+                rand1 = np.random.rand(self.d_model, self.d_model)
+                ir1 = np.dot(attn_residual, rand1)
+                ir2 = np.dot(ir1, rand1)
 
             # LN2
             ln2 = self.layer_norm(attn_residual, self.ln2_gamma[layer], self.ln2_beta[layer])
@@ -295,6 +304,8 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
             #print(state)
             start = time.time()
             input_hidden = state['input']
+            #print(f"input hidden shape: {input_hidden.shape[1]}")
+            self.seq_len = input_hidden.shape[1]
             logits, layer_time, total_time = self.full_forward_all(input_hidden)
             end = time.time()
             local_storage.all_times[op_id] = ('server', (end - start) * 1000)

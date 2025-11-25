@@ -125,7 +125,7 @@ def run(run_times = 5):
     client = TransformerClient()
     
     # Warmup
-    warmup_runs = 4
+    warmup_runs = 1
     print(f"Performing {warmup_runs} warmup runs...")
     for _ in range(warmup_runs):
         _, _ = perform_inference(client, stub, "Warmup input", collect_times=False)
@@ -139,4 +139,4 @@ def run(run_times = 5):
         _, next_token_id = perform_inference(client, stub, input_text, collect_times=True)
 
 if __name__ == '__main__':
-    run(run_times=5)
+    run(run_times=1)
