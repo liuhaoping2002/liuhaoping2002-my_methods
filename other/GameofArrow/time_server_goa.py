@@ -166,7 +166,7 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
              import contextlib
              context_manager = contextlib.nullcontext()
 
-        print(f"getting op_id: {op_id} from client: {list(state.keys())} ")
+        #print(f"getting op_id: {op_id} from client: {list(state.keys())} ")
         # [统计] 纯计算时间累加器 (针对当前 RPC 请求)
         pure_compute_time = 0.0
 
@@ -179,7 +179,7 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
 
             while True:
                 local_i = i % 100
-                print(f"Processing op_id: {i} {list(s.keys())}")
+                #print(f"Processing op_id: {i} {list(s.keys())}")
                 
                 if i >= 1202: # Logits
                     # [计时] Logits Matmul
@@ -318,7 +318,7 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
         
         # 转换回 numpy
         out_state_np = self._to_numpy_state(response_state)
-        print(f"sending op_id: {op_id} to client: {list(out_state_np.keys())} ")
+        #print(f"sending op_id: {op_id} to client: {list(out_state_np.keys())} ")
         
         # [统计] 服务端总计时结束
 

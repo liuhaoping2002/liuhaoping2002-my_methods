@@ -66,13 +66,10 @@ def deobf_state_double(X, Y, state_np):
     v = np.random.rand(1, H, 1, Ddim)
     DO = D1[..., None] * O
 
-    print(f"x shape: {X.shape}, Yt shape: {Y.shape}")
-    
-
-    # (D O) @ (v Y^T) → (1,H,S,S)
+    #print(f"x shape: {X.shape}, Yt shape: {Y.shape}")
     # 右乘 B
     confusion = np.matmul(DO, np.matmul(v, Yt)) * D2[:, :, :, None]
-
+    confusion = np.matmul(DO, np.matmul(v, Yt)) * D2[:, :, :, None]
     # ===== 最终注意力矩阵 ======
     #return attn + confusion
     
@@ -94,14 +91,11 @@ def deobf_state_double12(attn, V, state_np):
         v  = np.random.rand(1, H, 1, Ddim)
 
         # DO  : (1,H,S,1)
-        DO = D1[..., None] * O
-
         # vY  : (1,H,1,D) @ (1,H,S,D) → (1,H,1,D)
-        # 但我们需要 (1,H,1,D)，所以按元素相乘并沿 S 方向求和：
         vY = np.sum(v * Y, axis=2, keepdims=True)   # (1,H,1,D)
 
         # final confusion: (1,H,S,1) @ (1,H,1,D) → (1,H,S,D)
-        confusion = DO * vY
+        confusion = D1[..., None] * O * vY
         new_state[i] = Y + confusion
         # ===== 3. 加到 attn@V =====
     return np_to_state(new_state)
@@ -513,13 +507,13 @@ def perform_inference(client, stub, input_text, profiler=None):
                     past_op_id[9] = 'ln2'
                     past_op_id[11] = 'gelu'
                     t_scale_start = time.perf_counter()
-                    print(f"Layer {layer} Op {i}: Deobfuscating received state for keys {list(received_state.keys())}.")
+                    #print(f"Layer {layer} Op {i}: Deobfuscating received state for keys {list(received_state.keys())}.")
                     if i%100 in [2, 6, 9, 11]:
                         decrypted_state = deobf_state_single(state[past_op_id[i%100]], received_state)
                     elif i%100 ==3 :
                         decrypted_state = deobf_state_double(state['K'],state['Q'], received_state)
                     elif i%100 ==5 :
-                        print(list(state.keys()))
+                        #(list(state.keys()))
                         decrypted_state = deobf_state_double12(state['attn'],state['V'],received_state)
                     t_scale_end = time.perf_counter()
                     if profiler: profiler.log_scaling(layer, t_scale_end - t_scale_start)
@@ -603,4 +597,4 @@ def run(input_len=5, run_times=1):
         my_profiler.print_report()
 
 if __name__ == '__main__':
-    run(run_times=1)
+    run(run_times=5)
