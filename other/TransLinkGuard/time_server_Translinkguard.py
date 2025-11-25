@@ -277,6 +277,7 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
                     t0 = time.perf_counter()
                     if self.use_cuda:
                         s['attn'] = torch.softmax(s['scores'], dim=-1)
+                        self._sync()
                     else:
                         s['attn'] = sp_softmax(s['scores'], axis=-1)
                     t1 = time.perf_counter()
@@ -302,6 +303,7 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
                         B, H, S_q, d_v = s['aout'].shape
                         s['aout'] = s['aout'].permute(0, 2, 1, 3).reshape(B, S_q, self.d_model)
                         s['attn_out'] = torch.matmul(s['aout'], self.c_proj_w[current_layer]) + self.c_proj_b[current_layer][None, None, :]
+                        self._sync()
                     else:
                         B, H, S_q, d_v = s['aout'].shape
                         s['aout'] = s['aout'].transpose(0, 2, 1, 3).reshape(B, S_q, self.d_model)
@@ -345,6 +347,7 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
                     t0 = time.perf_counter()
                     if self.use_cuda:
                         s['gelu'] = torch.nn.functional.gelu(s['ff1'])
+                        self._sync()
                     else:
                         s['gelu'] = np.maximum(0, s['ff1']) * np.minimum(1, 0.5 + 0.7978845608 * (s['ff1'] + 0.044715 * s['ff1']**3))
                     t1 = time.perf_counter()
