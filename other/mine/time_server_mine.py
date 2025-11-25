@@ -162,6 +162,7 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
             var = ((x - mean) ** 2).mean(dim=-1, keepdim=True)
             std = torch.sqrt(var + eps)
             norm = (x - mean) / std
+            self._sync()
             return norm * weight + bias
         else:
             mean = x.mean(axis=-1, keepdims=True)
@@ -181,6 +182,11 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
             return torch.softmax(x, dim=axis)
         else:
             return sp_softmax(x, axis=axis)
+        
+    def _sync(self):
+        """同步 CUDA 流，确保计时准确"""
+        if self.use_cuda:
+            torch.cuda.synchronize()
 
     def full_forward_all(self, input_hidden, whether_warmup=False):
         """
@@ -212,6 +218,7 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
             if self.use_cuda:
                 t0 = perf()
                 proj = torch.matmul(ln1, self.c_attn_w[layer]) + self.c_attn_b[layer][None, None, :]
+                self._sync()
                 t1 = perf(); compute_time += (t1 - t0)
 
                 # 下面的 reshape / permute 不计时（只做形状调整）
@@ -235,6 +242,7 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
             if self.use_cuda:
                 t0 = perf()
                 scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
+                self._sync()
                 t1 = perf(); compute_time += (t1 - t0)
 
                 # mask 的生成（形状操作）不计时，但 mask 加到 scores 是数值计算，应计时
@@ -260,12 +268,15 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
             # ========== softmax ==========
             t0 = perf()
             attn = self.softmax(scores, axis=-1)
+            if self.use_cuda:
+                self._sync()
             t1 = perf(); compute_time += (t1 - t0)
 
             # ========== attn @ V ==========
             t0 = perf()
             if self.use_cuda:
                 aout = torch.matmul(attn, V)
+                self._sync()
             else:
                 aout = np.matmul(attn, V)
             t1 = perf(); compute_time += (t1 - t0)
@@ -277,6 +288,7 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
                 aout = aout.permute(0, 2, 1, 3).reshape(B, S_q, self.d_model)
                 t0 = perf()
                 attn_out = torch.matmul(aout, self.c_proj_w[layer]) + self.c_proj_b[layer][None, None, :]
+                self._sync()
                 t1 = perf(); compute_time += (t1 - t0)
             else:
                 B, H, S_q, d_v = aout.shape
@@ -289,6 +301,8 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
             # 这里 x + attn_out 是一次简单加法（数值计算），我们也计时它
             t0 = perf()
             attn_residual = x + attn_out
+            if self.use_cuda:
+                self._sync()
             t1 = perf(); compute_time += (t1 - t0)
 
             # ========== 随机矩阵相关（rand1的生成不计时，但矩阵乘计时） ==========
@@ -298,6 +312,7 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
                 t0 = perf()
                 ir1 = torch.matmul(attn_residual, rand1)
                 ir2 = torch.matmul(ir1, rand1)
+                self._sync()
                 t1 = perf(); compute_time += (t1 - t0)
             else:
                 rand1 = np.random.rand(self.d_model, self.d_model)
@@ -315,6 +330,7 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
             t0 = perf()
             if self.use_cuda:
                 ff1 = torch.matmul(ln2, self.mlp_c_fc_w[layer]) + self.mlp_c_fc_b[layer][None, None, :]
+                self._sync()
             else:
                 ff1 = np.dot(ln2, self.mlp_c_fc_w[layer]) + self.mlp_c_fc_b[layer][None, None, :]
             t1 = perf(); compute_time += (t1 - t0)
@@ -322,12 +338,15 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
             # ========== GELU ==========
             t0 = perf()
             gelu = self.gelu(ff1)
+            if self.use_cuda:
+                self._sync()
             t1 = perf(); compute_time += (t1 - t0)
 
             # ========== FF2 ==========
             t0 = perf()
             if self.use_cuda:
                 ff2 = torch.matmul(gelu, self.mlp_c_proj_w[layer]) + self.mlp_c_proj_b[layer][None, None, :]
+                self._sync()
             else:
                 ff2 = np.dot(gelu, self.mlp_c_proj_w[layer]) + self.mlp_c_proj_b[layer][None, None, :]
             t1 = perf(); compute_time += (t1 - t0)
@@ -335,6 +354,8 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
             # ========== final residual (数值相加，计时) ==========
             t0 = perf()
             x = attn_residual + ff2
+            if self.use_cuda:
+                self._sync()
             t1 = perf(); compute_time += (t1 - t0)
 
             # 存储本层的纯计算耗时（毫秒）
