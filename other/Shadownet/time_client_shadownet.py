@@ -435,10 +435,16 @@ def perform_inference(client, stub, input_text, profiler=None):
                     if profiler: profiler.log_scaling(layer, t_scale_end - t_scale_start)
 
                     state.update(received_state)
-
-                    if 'ln1' in state and local_i > 1: del state['ln1']
-                    if 'ln2' in state and local_i > 8: del state['ln2']
-                    if 'gelu' in state and local_i > 10: del state['gelu']
+                    
+                    if 'ln1' in state and local_i > 1: del state['ln1'], state['c_attn_w'], state['c_attn_b']      
+                    if 'K' in state and local_i > 3: del state['K'], state['Q']
+                    if 'scores' in state and local_i > 4: del state['scores']
+                    if 'attn' in state and local_i > 5: del state['attn'], state['V']
+                    if 'c_proj_w' in state and local_i > 5: del state['c_proj_w'], state['c_proj_b'], state['aout']
+                    if 'ln2' in state and local_i > 8: del state['ln2'], state['mlp_c_fc_w'], state['mlp_c_fc_b']
+                    if 'mlp_c_fc_w' in state and local_i > 9: del state['mlp_c_fc_w'], state['mlp_c_fc_b']
+                    if 'gelu' in state and local_i > 10: del state['gelu'], state['mlp_c_proj_w'], state['mlp_c_proj_b'], state['ff1']
+                    print(f" {i} Layer {layer} Op {local_i} completed. State keys: {list(state.keys())}")
 
         finally:
             del layer_params
