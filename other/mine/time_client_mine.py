@@ -103,7 +103,7 @@ def perform_inference(client, stub, input_text, collect_times=True):
         all_times['embedding'] = (end_time-start_time)*1000
     
     A = sample_A_constructive(client.hidden_size, a=1.8)['A']
-    print(f"shape of hidden: {hidden.shape} A: {A.shape}")
+    #print(f"shape of hidden: {hidden.shape} A: {A.shape}")
     start_time = time.time() if collect_times else None
     A_obf = hidden@A
     A_deobf = A_obf@A

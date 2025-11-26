@@ -178,7 +178,7 @@ class TransformerService(demo_pb2_grpc.TransformerServiceServicer):
 
             while True:
                 local_i = i % 100
-                print(f"Processing op_id: {i} {list(s.keys())}")
+                #print(f"Processing op_id: {i} {list(s.keys())}")
                 
                 if i >= 1202: # Logits
                     # [计时] Logits Matmul
