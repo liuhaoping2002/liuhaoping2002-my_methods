@@ -408,13 +408,13 @@ class TransformerClient:
 from transformers import ViTImageProcessor
 def perform_inference(client, stub, image_pil, profiler=None):
     # --- 阶段 1: Embedding (按需加载，用完即弃) ---
-    processor = ViTImageProcessor.from_pretrained("google/vit-base-patch16-224")
+    processor = ViTImageProcessor.from_pretrained("../vit-base-client")
     inputs = processor(images=image_pil, return_tensors="pt")
     pixel_values = inputs.pixel_values  # [1,3,224,224]
 
     # 2. 只跑官方 ViT 的 embedding 层（获取 [1,197,768]）
     from transformers import ViTModel
-    vit = ViTModel.from_pretrained("google/vit-base-patch16-224")
+    vit = ViTModel.from_pretrained("../vit-base-client")
     with torch.no_grad():
         embeddings = vit.embeddings(pixel_values)  # 包含 cls token + pos embed + patch proj
     hidden = embeddings.cpu().numpy().astype(np.float32)  # [1,197,768]
@@ -575,7 +575,9 @@ def run(input_len=5, run_times=1):
     
     # Warmup - 不开启 Profiler
     print("--- Starting Warmup ---")
-    #_ = perform_inference(client, stub, "Warmup", profiler=None)
+    nnp = np.random.randint(0, 256, (256,256,3), dtype=np.uint8)
+    np_img = Image.fromarray(nnp, mode='RGB')
+    _ = perform_inference(client, stub, np_img, profiler=None)
     print("--- Warmup Finished ---")
     
     #input_text = make_random_token_string(input_len)
